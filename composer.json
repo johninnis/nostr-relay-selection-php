@@ -1,0 +1,46 @@
+{
+    "name": "innis/nostr-relay-selection",
+    "description": "Pure-function PHP library for Nostr outbox-model publish/read routing: NIP-65/17/50/57, zero runtime dependencies.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["nostr", "relay", "routing", "domain"],
+    "authors": [
+        {
+            "name": "John Innis",
+            "email": "john@innis.xyz",
+            "homepage": "https://www.innis.xyz/"
+        }
+    ],
+    "require": {
+        "php": "^8.3"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.85",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Innis\\Nostr\\RelaySelection\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Innis\\Nostr\\RelaySelection\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": [
+            "phpunit",
+            "@analyse"
+        ],
+        "test-unit": "phpunit --testsuite=Unit",
+        "test-coverage": "XDEBUG_MODE=coverage phpunit --coverage-html var/tests/coverage/html --coverage-text --coverage-clover var/tests/coverage/clover.xml",
+        "analyse": "phpstan analyse",
+        "fix-style": "php-cs-fixer fix",
+        "check-style": "php-cs-fixer fix --dry-run --diff"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

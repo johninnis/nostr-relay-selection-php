@@ -1,0 +1,17 @@
+parameters:
+    level: 9
+    paths:
+        - src
+        - tests
+        - example.php
+    tmpDir: var/phpstan
+    ignoreErrors:
+        -
+            identifier: missingType.iterableValue
+        # PHP's parse_url returns port 0 at runtime for "host:0" inputs, but PHPStan's
+        # stub types port as int<1, 65535>. The explicit out-of-range check is live
+        # defensive code; the upper bound is unreachable through parse_url alone.
+        -
+            message: '#Comparison operation .* between int<1, 65535> and 65535 is always false#'
+            path: src/Domain/ValueObject/Protocol/RelayUrl.php
+            count: 1
