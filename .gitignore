@@ -12,3 +12,6 @@ composer.lock
 /.idea
 
 .#*
+/phpstan.neon
+/.php-cs-fixer.php
+/phpunit.xml
