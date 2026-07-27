@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+// Deliberate: re-declared rather than taken from nostr-core — see ADR-0002
+
 // Minimal duplicate of innis/nostr-core's Filter entity, scoped to the fields
 // relay selection consumes (kinds, #p tag values, search). innis/nostr-relay-selection
 // must not depend on innis/nostr-core, so the type is re-declared here. Other
@@ -15,9 +17,15 @@ use InvalidArgumentException;
 
 final readonly class Filter
 {
+    /** @var ?list<int> */
     private ?array $kinds;
+    /** @var ?list<PublicKey> */
     private ?array $pTags;
 
+    /**
+     * @param ?array<array-key, mixed> $kinds
+     * @param ?array<array-key, mixed> $pTags
+     */
     public function __construct(
         ?array $kinds = null,
         ?array $pTags = null,
@@ -41,11 +49,17 @@ final readonly class Filter
         $this->pTags = null !== $pTags ? array_values($pTags) : null;
     }
 
+    /**
+     * @return ?list<int>
+     */
     public function getKinds(): ?array
     {
         return $this->kinds;
     }
 
+    /**
+     * @return ?list<PublicKey>
+     */
     public function getPTags(): ?array
     {
         return $this->pTags;
@@ -61,7 +75,7 @@ final readonly class Filter
         return null !== $this->search && '' !== $this->search;
     }
 
-    public static function fromRaw(mixed $raw): ?self
+    public static function tryFromRaw(mixed $raw): ?self
     {
         if (!is_array($raw)) {
             return null;
@@ -91,7 +105,7 @@ final readonly class Filter
                 if (!is_string($rawPubkey)) {
                     return null;
                 }
-                $pubkey = PublicKey::fromHex($rawPubkey);
+                $pubkey = PublicKey::tryFromHex($rawPubkey);
                 if (null === $pubkey) {
                     return null;
                 }

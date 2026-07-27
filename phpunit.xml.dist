@@ -4,12 +4,20 @@
          bootstrap="vendor/autoload.php"
          colors="true"
          failOnEmptyTestSuite="true"
+         failOnDeprecation="true"
          failOnIncomplete="true"
          failOnRisky="true"
+         failOnNotice="true"
          failOnSkipped="true"
          failOnWarning="true"
+         failOnPhpunitDeprecation="true"
          stopOnFailure="false"
          cacheDirectory="var/phpunit/cache">
+    <php>
+        <ini name="display_errors" value="1" />
+        <ini name="error_reporting" value="-1" />
+    </php>
+
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
@@ -18,7 +26,10 @@
             <directory>tests/Compliance</directory>
         </testsuite>
     </testsuites>
-    <source>
+    <source ignoreSuppressionOfDeprecations="true"
+            ignoreIndirectDeprecations="true"
+            restrictNotices="true"
+            restrictWarnings="true">
         <include>
             <directory>src</directory>
         </include>

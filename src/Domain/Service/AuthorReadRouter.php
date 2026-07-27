@@ -6,10 +6,15 @@ namespace Innis\Nostr\RelaySelection\Domain\Service;
 
 use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorReadRouteContext;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\AuthorReadRoute;
 
-final class RouteAuthorReadsService
+final class AuthorReadRouter
 {
+    /**
+     * @return list<AuthorReadRoute>
+     */
     public static function route(AuthorReadRouteContext $context): array
     {
         $uniqueAuthors = self::deduplicate($context->getAuthorPubkeys());
@@ -36,6 +41,12 @@ final class RouteAuthorReadsService
         return $routes;
     }
 
+    /**
+     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
+     * @param list<RelayUrl>                                                           $blocked
+     *
+     * @return array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}>
+     */
     private static function filterBlocked(array $relayToAuthors, array $blocked): array
     {
         if ([] === $blocked) {
@@ -54,6 +65,11 @@ final class RouteAuthorReadsService
         return $relayToAuthors;
     }
 
+    /**
+     * @param list<PublicKey> $authors
+     *
+     * @return list<PublicKey>
+     */
     private static function deduplicate(array $authors): array
     {
         $seen = [];
@@ -70,6 +86,11 @@ final class RouteAuthorReadsService
         return $unique;
     }
 
+    /**
+     * @param list<PublicKey> $authors
+     *
+     * @return array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}>
+     */
     private static function buildRelayToAuthorsMap(array $authors, AuthorReadRouteContext $context): array
     {
         $map = [];
@@ -98,6 +119,11 @@ final class RouteAuthorReadsService
         return $map;
     }
 
+    /**
+     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
+     *
+     * @return array<string, true>
+     */
     private static function collectAuthorsWithRelays(array $relayToAuthors): array
     {
         $set = [];
@@ -110,6 +136,11 @@ final class RouteAuthorReadsService
         return $set;
     }
 
+    /**
+     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
+     *
+     * @return array<string, int>
+     */
     private static function buildMaxCoverByAuthor(array $relayToAuthors): array
     {
         $counts = [];
@@ -122,6 +153,12 @@ final class RouteAuthorReadsService
         return $counts;
     }
 
+    /**
+     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
+     * @param array<string, int>                                                       $maxCoverByAuthor
+     *
+     * @return list<array{relay: RelayUrl, authors: list<PublicKey>}>
+     */
     private static function greedySetCover(array $relayToAuthors, array $maxCoverByAuthor, ?int $target): array
     {
         $coverByAuthor = [];
@@ -161,6 +198,11 @@ final class RouteAuthorReadsService
         return $picks;
     }
 
+    /**
+     * @param list<array{relay: RelayUrl, authors: list<PublicKey>}> $picks
+     *
+     * @return list<AuthorReadRoute>
+     */
     private static function picksToRoutes(array $picks, int $cap): array
     {
         $routes = [];
@@ -171,6 +213,12 @@ final class RouteAuthorReadsService
         return $routes;
     }
 
+    /**
+     * @param list<PublicKey>     $authors
+     * @param array<string, true> $authorsWithRelays
+     *
+     * @return list<PublicKey>
+     */
     private static function filterAuthorsWithoutRelays(array $authors, array $authorsWithRelays): array
     {
         $result = [];
@@ -183,10 +231,15 @@ final class RouteAuthorReadsService
         return $result;
     }
 
+    /**
+     * @param array<array-key, PublicKey> $items
+     *
+     * @return list<list<PublicKey>>
+     */
     private static function chunkPubkeys(array $items, int $size): array
     {
         if ($size <= 0 || count($items) <= $size) {
-            return [$items];
+            return [array_values($items)];
         }
 
         return array_chunk($items, $size);

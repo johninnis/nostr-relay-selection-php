@@ -8,7 +8,7 @@ use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\RelayHintContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 
-final class SelectRelayHintService
+final class RelayHintSelector
 {
     public static function select(RelayHintContext $context): ?RelayUrl
     {

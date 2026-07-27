@@ -4,12 +4,20 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\ValueObject\Context;
 
+use Innis\Nostr\RelaySelection\Domain\Entity\Event;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 
 final readonly class PublishContext
 {
-    public const DEFAULT_PER_RECIPIENT_CAP = 3;
+    public const int DEFAULT_PER_RECIPIENT_CAP = 3;
 
+    /**
+     * @param list<Event>    $relayListEvents
+     * @param list<RelayUrl> $privateContentRelays
+     * @param list<RelayUrl> $indexerRelays
+     * @param list<RelayUrl> $blockedRelays
+     */
     public function __construct(
         private PublicKey $userPubkey,
         private array $relayListEvents,
@@ -25,16 +33,25 @@ final readonly class PublishContext
         return $this->userPubkey;
     }
 
+    /**
+     * @return list<Event>
+     */
     public function getRelayListEvents(): array
     {
         return $this->relayListEvents;
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     public function getPrivateContentRelays(): array
     {
         return $this->privateContentRelays;
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     public function getIndexerRelays(): array
     {
         return $this->indexerRelays;
@@ -45,6 +62,9 @@ final readonly class PublishContext
         return $this->perRecipientCap;
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     public function getBlockedRelays(): array
     {
         return $this->blockedRelays;

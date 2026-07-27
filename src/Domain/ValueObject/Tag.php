@@ -2,14 +2,20 @@
 
 declare(strict_types=1);
 
+// Deliberate: re-declared rather than taken from nostr-core — see ADR-0002
+
 namespace Innis\Nostr\RelaySelection\Domain\ValueObject;
 
 use InvalidArgumentException;
 
 final readonly class Tag
 {
+    /** @var list<string> */
     private array $values;
 
+    /**
+     * @param array<array-key, mixed> $values
+     */
     public function __construct(array $values)
     {
         foreach ($values as $value) {
@@ -25,7 +31,7 @@ final readonly class Tag
         return $this->values[$index] ?? null;
     }
 
-    public static function fromRaw(mixed $raw): ?self
+    public static function tryFromRaw(mixed $raw): ?self
     {
         if (!is_array($raw)) {
             return null;

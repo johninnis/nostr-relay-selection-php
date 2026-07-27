@@ -9,6 +9,9 @@ use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
 
 final class EventSelector
 {
+    /**
+     * @param list<Event> $events
+     */
     public static function newestByPubkeyAndKind(array $events, PublicKey $pubkey, int $kind): ?Event
     {
         $newest = null;

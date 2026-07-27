@@ -8,8 +8,13 @@ use Innis\Nostr\RelaySelection\Domain\Entity\Event;
 use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
 
-final class MissingRelayListPubkeysService
+final class MissingRelayListFinder
 {
+    /**
+     * @param list<Event> $relayListEvents
+     *
+     * @return list<PublicKey>
+     */
     public static function find(Event $event, array $relayListEvents): array
     {
         if (!EventKind::isInboxFanout($event->getKind())) {
@@ -29,6 +34,9 @@ final class MissingRelayListPubkeysService
         return $missing;
     }
 
+    /**
+     * @return array<string, PublicKey>
+     */
     private static function collectPTaggedPubkeys(Event $event): array
     {
         $result = [];
@@ -40,7 +48,7 @@ final class MissingRelayListPubkeysService
             if (null === $hex || isset($result[$hex])) {
                 continue;
             }
-            $pubkey = PublicKey::fromHex($hex);
+            $pubkey = PublicKey::tryFromHex($hex);
             if (null === $pubkey) {
                 continue;
             }
@@ -50,6 +58,12 @@ final class MissingRelayListPubkeysService
         return $result;
     }
 
+    /**
+     * @param array<string, PublicKey> $ptagged
+     * @param list<Event>              $relayListEvents
+     *
+     * @return array<string, true>
+     */
     private static function collectPubkeysWithRelayList(array $ptagged, array $relayListEvents): array
     {
         $set = [];

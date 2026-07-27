@@ -2,15 +2,12 @@
 
 declare(strict_types=1);
 
-// Duplicate of innis/nostr-core's RelayUrl value object. innis/nostr-relay-selection
-// ships zero runtime dependencies (see README "Zero runtime dependencies"), so it must
-// not depend on innis/nostr-core; the type is re-declared here instead. Normalisation
-// and validation are kept identical to nostr-core's so a URL routed through one and
-// stored by the other compares equal as a string and both libraries accept and reject
-// the same inputs at the boundary. Malformed hostnames, fragments, %20 in paths,
-// concatenated URLs, out-of-range ports, and URLs over 200 chars are all rejected.
+// Deliberate: re-declared rather than taken from nostr-core; normalisation is corpus-locked
+// to nostr-core's so the two agree on relay identity — see ADR-0002
 
 namespace Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol;
+
+use Override;
 
 final readonly class RelayUrl
 {
@@ -23,6 +20,7 @@ final readonly class RelayUrl
         return $this->url === $other->url;
     }
 
+    #[Override]
     public function __toString(): string
     {
         return $this->url;
@@ -77,7 +75,7 @@ final readonly class RelayUrl
         return strtolower((string) ($parsed['host'] ?? ''));
     }
 
-    public static function fromString(?string $url): ?self
+    public static function tryFromString(?string $url): ?self
     {
         if (null === $url) {
             return null;

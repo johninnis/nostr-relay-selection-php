@@ -6,10 +6,10 @@ require __DIR__.'/vendor/autoload.php';
 
 use Innis\Nostr\RelaySelection\Domain\Entity\Event;
 use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
-use Innis\Nostr\RelaySelection\Domain\Service\RouteAuthorReadsService;
-use Innis\Nostr\RelaySelection\Domain\Service\RoutePublishService;
-use Innis\Nostr\RelaySelection\Domain\Service\SelectAuthorRelaysService;
-use Innis\Nostr\RelaySelection\Domain\Service\SelectRelayHintService;
+use Innis\Nostr\RelaySelection\Domain\Service\AuthorReadRouter;
+use Innis\Nostr\RelaySelection\Domain\Service\AuthorRelaySelector;
+use Innis\Nostr\RelaySelection\Domain\Service\PublishRouter;
+use Innis\Nostr\RelaySelection\Domain\Service\RelayHintSelector;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorReadRouteContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorRelaysContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\PublishContext;
@@ -18,6 +18,9 @@ use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Tag;
 
+/**
+ * @return array{name: string, pubkey: PublicKey, events: list<Event>}
+ */
 function loadAuthor(string $path): array
 {
     $contents = file_get_contents($path);
@@ -36,27 +39,27 @@ function loadAuthor(string $path): array
         throw new RuntimeException('Malformed fixture: '.$path);
     }
 
-    $events = array_map(
+    $events = array_values(array_map(
         static function (mixed $raw) use ($path): Event {
             if (!is_array($raw)) {
                 throw new RuntimeException('Event entry is not a JSON object in: '.$path);
             }
 
-            return Event::fromRaw($raw) ?? throw new RuntimeException('Invalid event in: '.$path);
+            return Event::tryFromRaw($raw) ?? throw new RuntimeException('Invalid event in: '.$path);
         },
         $rawEvents,
-    );
+    ));
 
     return [
         'name' => $name,
-        'pubkey' => PublicKey::fromHex($pubkeyHex) ?? throw new RuntimeException('Invalid pubkey'),
+        'pubkey' => PublicKey::tryFromHex($pubkeyHex) ?? throw new RuntimeException('Invalid pubkey'),
         'events' => $events,
     ];
 }
 
 function relayUrl(string $url): RelayUrl
 {
-    return RelayUrl::fromString($url) ?? throw new RuntimeException('Invalid relay URL: '.$url);
+    return RelayUrl::tryFromString($url) ?? throw new RuntimeException('Invalid relay URL: '.$url);
 }
 
 function printSection(string $title): void
@@ -64,6 +67,9 @@ function printSection(string $title): void
     echo "\n=== {$title} ===\n\n";
 }
 
+/**
+ * @param ?list<RelayUrl> $relays
+ */
 function printRelays(string $label, ?array $relays): void
 {
     if (null === $relays) {
@@ -82,6 +88,9 @@ function printRelays(string $label, ?array $relays): void
     }
 }
 
+/**
+ * @param array<string, array{name: string, pubkey: PublicKey, events: list<Event>}> $authors
+ */
 function authorName(PublicKey $pubkey, array $authors): string
 {
     foreach ($authors as $author) {
@@ -99,7 +108,9 @@ if (false === $paths) {
 }
 sort($paths);
 
+/** @var array<string, array{name: string, pubkey: PublicKey, events: list<Event>}> $authors */
 $authors = [];
+/** @var list<Event> $allRelayListEvents */
 $allRelayListEvents = [];
 foreach ($paths as $path) {
     $author = loadAuthor($path);
@@ -107,18 +118,18 @@ foreach ($paths as $path) {
     $allRelayListEvents = array_merge($allRelayListEvents, $author['events']);
 }
 
-printSection('Per-author relay extraction (SelectAuthorRelaysService)');
+printSection('Per-author relay extraction (AuthorRelaySelector)');
 
 foreach ($authors as $name => $author) {
     echo "{$name} ".substr($author['pubkey']->toHex(), 0, 8)."...\n";
     $context = new AuthorRelaysContext($author['pubkey'], $author['events']);
-    printRelays('inbox', SelectAuthorRelaysService::inbox($context));
-    printRelays('outbox', SelectAuthorRelaysService::outbox($context));
-    printRelays('dm', SelectAuthorRelaysService::dm($context));
+    printRelays('inbox', AuthorRelaySelector::inbox($context));
+    printRelays('outbox', AuthorRelaySelector::outbox($context));
+    printRelays('dm', AuthorRelaySelector::dm($context));
     echo "\n";
 }
 
-printSection('Publish routing (RoutePublishService)');
+printSection('Publish routing (PublishRouter)');
 echo "Derek posts a kind 1 note p-tagging fiatjaf and PABLOF7z.\n";
 echo "Result fans out across Derek's outbox + recipient inboxes (capped at 3 per recipient).\n";
 
@@ -139,11 +150,11 @@ $publishContext = new PublishContext(
     [],
 );
 
-$publishRoute = RoutePublishService::route($kind1, $publishContext);
+$publishRoute = PublishRouter::route($kind1, $publishContext);
 echo "  branch: {$publishRoute->getBranch()->value}\n";
 printRelays('publish to', $publishRoute->getRelays());
 
-printSection('Author-set-cover routing (RouteAuthorReadsService)');
+printSection('Author-set-cover routing (AuthorReadRouter)');
 echo "Reading notes from all four authors. Greedy set-cover picks the\n";
 echo "smallest number of relays that reach every author with the configured\n";
 echo "redundancy (default 3).\n\n";
@@ -154,7 +165,7 @@ $readContext = new AuthorReadRouteContext(
     [relayUrl('wss://relay.damus.io'), relayUrl('wss://nos.lol')],
 );
 
-$routes = RouteAuthorReadsService::route($readContext);
+$routes = AuthorReadRouter::route($readContext);
 foreach ($routes as $i => $route) {
     $relayLine = implode(', ', array_map(static fn (RelayUrl $r) => (string) $r, $route->getRelays()));
     echo '  Route '.($i + 1).":\n";
@@ -166,12 +177,12 @@ foreach ($routes as $i => $route) {
     echo "\n";
 }
 
-printSection('Relay hint selection (SelectRelayHintService)');
+printSection('Relay hint selection (RelayHintSelector)');
 echo "Derek wants to reference a fiatjaf post via an e-tag. Which relay URL\n";
 echo "to attach as the hint? The lib prefers the intersection of Derek's\n";
 echo "outbox with fiatjaf's inbox, falling back to either side's first relay.\n\n";
 
-$hint = SelectRelayHintService::select(new RelayHintContext(
+$hint = RelayHintSelector::select(new RelayHintContext(
     $authors['fiatjaf']['pubkey'],
     $authors['Derek Ross']['pubkey'],
     $allRelayListEvents,

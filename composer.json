@@ -3,7 +3,12 @@
     "description": "Pure-function PHP library for Nostr outbox-model publish/read routing: NIP-65/17/50/57, zero runtime dependencies.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["nostr", "relay", "routing", "domain"],
+    "keywords": [
+        "nostr",
+        "relay",
+        "routing",
+        "domain"
+    ],
     "authors": [
         {
             "name": "John Innis",
@@ -12,12 +17,15 @@
         }
     ],
     "require": {
-        "php": "^8.3"
+        "php": "^8.4"
     },
     "require-dev": {
-        "friendsofphp/php-cs-fixer": "^3.85",
-        "phpstan/phpstan": "^2.1",
-        "phpunit/phpunit": "^11.0"
+        "friendsofphp/php-cs-fixer": "^3.95",
+        "innis/coding-standards": "^0.1",
+        "phpstan/phpstan": "~2.2.2",
+        "phpstan/phpstan-phpunit": "^2.0",
+        "phpunit/phpunit": "^13.1",
+        "rector/rector": "~2.4.6"
     },
     "autoload": {
         "psr-4": {
@@ -38,7 +46,9 @@
         "test-coverage": "XDEBUG_MODE=coverage phpunit --coverage-html var/tests/coverage/html --coverage-text --coverage-clover var/tests/coverage/clover.xml",
         "analyse": "phpstan analyse",
         "fix-style": "php-cs-fixer fix",
-        "check-style": "php-cs-fixer fix --dry-run --diff"
+        "check-style": "php-cs-fixer fix --dry-run --diff",
+        "rector": "rector process",
+        "check-rector": "rector process --dry-run"
     },
     "config": {
         "sort-packages": true

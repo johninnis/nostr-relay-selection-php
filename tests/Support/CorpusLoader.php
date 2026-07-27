@@ -8,6 +8,9 @@ use RuntimeException;
 
 final class CorpusLoader
 {
+    /**
+     * @return list<array<string, mixed>>
+     */
     public static function load(string $filename): array
     {
         $path = __DIR__.'/../corpus/'.$filename;
@@ -20,6 +23,18 @@ final class CorpusLoader
             throw new RuntimeException(sprintf('Corpus file %s is not a JSON array', $filename));
         }
 
-        return $decoded;
+        $vectors = [];
+        foreach ($decoded as $vector) {
+            if (!is_array($vector)) {
+                throw new RuntimeException(sprintf('Corpus file %s holds a vector that is not an object', $filename));
+            }
+            $named = [];
+            foreach ($vector as $key => $value) {
+                $named[(string) $key] = $value;
+            }
+            $vectors[] = $named;
+        }
+
+        return $vectors;
     }
 }

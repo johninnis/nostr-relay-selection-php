@@ -9,31 +9,62 @@ use Innis\Nostr\RelaySelection\Domain\ValueObject\Tag;
 
 final class RelayListExtractor
 {
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     public static function inbox(array $tags): array
     {
         return self::fromRTags($tags, ['read', 'both']);
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     public static function outbox(array $tags): array
     {
         return self::fromRTags($tags, ['write', 'both']);
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     public static function dm(array $tags): array
     {
         return self::fromRelayTags($tags);
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     public static function blocked(array $tags): array
     {
         return self::fromRelayTags($tags);
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     public static function search(array $tags): array
     {
         return self::fromRelayTags($tags);
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     * @param list<string>            $acceptedMarkers
+     *
+     * @return list<RelayUrl>
+     */
     private static function fromRTags(array $tags, array $acceptedMarkers): array
     {
         $result = [];
@@ -49,7 +80,7 @@ final class RelayListExtractor
             if (!in_array($marker, $acceptedMarkers, true)) {
                 continue;
             }
-            $url = RelayUrl::fromString($rawUrl);
+            $url = RelayUrl::tryFromString($rawUrl);
             if (null !== $url) {
                 $result[] = $url;
             }
@@ -58,6 +89,11 @@ final class RelayListExtractor
         return $result;
     }
 
+    /**
+     * @param array<array-key, mixed> $tags
+     *
+     * @return list<RelayUrl>
+     */
     private static function fromRelayTags(array $tags): array
     {
         $result = [];
@@ -69,7 +105,7 @@ final class RelayListExtractor
             if (null === $rawUrl) {
                 continue;
             }
-            $url = RelayUrl::fromString($rawUrl);
+            $url = RelayUrl::tryFromString($rawUrl);
             if (null !== $url) {
                 $result[] = $url;
             }

@@ -12,7 +12,7 @@ use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\PublishRoute;
 
-final class RoutePublishService
+final class PublishRouter
 {
     public static function route(Event $event, PublishContext $context): PublishRoute
     {
@@ -39,6 +39,9 @@ final class RoutePublishService
         return new PublishRoute($branch, RelaySetBuilder::subtract($relays, $context->getBlockedRelays()));
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     private static function generalRelays(Event $event, PublishContext $context): array
     {
         $inbox = EventKind::isInboxFanout($event->getKind())
@@ -50,6 +53,9 @@ final class RoutePublishService
         return RelaySetBuilder::build(self::userOutbox($context), $inbox, $indexers);
     }
 
+    /**
+     * @return ?list<RelayUrl>
+     */
     private static function dmRelays(Event $event, PublishContext $context): ?array
     {
         $dmRelays = [];
@@ -71,6 +77,9 @@ final class RoutePublishService
         return [] === $relays ? null : $relays;
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     private static function draftRelays(PublishContext $context): array
     {
         if ([] !== $context->getPrivateContentRelays()) {
@@ -80,6 +89,9 @@ final class RoutePublishService
         return RelaySetBuilder::build(self::userOutbox($context));
     }
 
+    /**
+     * @return list<RelayUrl>
+     */
     private static function userOutbox(PublishContext $context): array
     {
         $list = EventSelector::newestByPubkeyAndKind(
@@ -91,6 +103,11 @@ final class RoutePublishService
         return null !== $list ? RelayListExtractor::outbox($list->getTags()) : [];
     }
 
+    /**
+     * @param list<Event> $relayListEvents
+     *
+     * @return list<RelayUrl>
+     */
     private static function recipientInboxFanout(Event $event, array $relayListEvents, int $cap): array
     {
         $out = [];
@@ -103,6 +120,12 @@ final class RoutePublishService
         return $out;
     }
 
+    /**
+     * @param array{pubkey: PublicKey, hint: ?RelayUrl} $recipient
+     * @param list<Event>                               $relayListEvents
+     *
+     * @return list<RelayUrl>
+     */
     private static function recipientInboxRelays(array $recipient, array $relayListEvents, int $cap): array
     {
         $relayList = EventSelector::newestByPubkeyAndKind(
@@ -122,6 +145,9 @@ final class RoutePublishService
         return null !== $hint ? [$hint] : [];
     }
 
+    /**
+     * @return list<array{pubkey: PublicKey, hint: ?RelayUrl}>
+     */
     private static function uniqueRecipientsInOrder(Event $event): array
     {
         $result = [];
@@ -134,13 +160,13 @@ final class RoutePublishService
             if (null === $hex || isset($seen[$hex])) {
                 continue;
             }
-            $pubkey = PublicKey::fromHex($hex);
+            $pubkey = PublicKey::tryFromHex($hex);
             if (null === $pubkey) {
                 continue;
             }
             $seen[$hex] = true;
             $rawHint = $tag->getValue(2);
-            $hint = null !== $rawHint && '' !== $rawHint ? RelayUrl::fromString($rawHint) : null;
+            $hint = null !== $rawHint && '' !== $rawHint ? RelayUrl::tryFromString($rawHint) : null;
             $result[] = ['pubkey' => $pubkey, 'hint' => $hint];
         }
 

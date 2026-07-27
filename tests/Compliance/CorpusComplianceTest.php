@@ -6,16 +6,16 @@ namespace Innis\Nostr\RelaySelection\Tests\Compliance;
 
 use Innis\Nostr\RelaySelection\Domain\Entity\Event;
 use Innis\Nostr\RelaySelection\Domain\Entity\Filter;
-use Innis\Nostr\RelaySelection\Domain\Service\FindFilterPatternService;
-use Innis\Nostr\RelaySelection\Domain\Service\MissingRelayListPubkeysService;
+use Innis\Nostr\RelaySelection\Domain\Service\AuthorReadRouter;
+use Innis\Nostr\RelaySelection\Domain\Service\AuthorRelaySelector;
+use Innis\Nostr\RelaySelection\Domain\Service\FilterPatternClassifier;
+use Innis\Nostr\RelaySelection\Domain\Service\MissingRelayListFinder;
+use Innis\Nostr\RelaySelection\Domain\Service\PublishRouter;
+use Innis\Nostr\RelaySelection\Domain\Service\ReadRouter;
+use Innis\Nostr\RelaySelection\Domain\Service\RelayHintSelector;
 use Innis\Nostr\RelaySelection\Domain\Service\RelayListExtractor;
 use Innis\Nostr\RelaySelection\Domain\Service\RelaySetBuilder;
-use Innis\Nostr\RelaySelection\Domain\Service\RouteAuthorReadsService;
-use Innis\Nostr\RelaySelection\Domain\Service\RoutePublishService;
-use Innis\Nostr\RelaySelection\Domain\Service\RouteReadService;
-use Innis\Nostr\RelaySelection\Domain\Service\SelectAuthorRelaysService;
-use Innis\Nostr\RelaySelection\Domain\Service\SelectRelayHintService;
-use Innis\Nostr\RelaySelection\Domain\Service\SelectZapRequestRelaysService;
+use Innis\Nostr\RelaySelection\Domain\Service\ZapRequestRelaySelector;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorReadRouteContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorRelaysContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\PublishContext;
@@ -38,10 +38,13 @@ final class CorpusComplianceTest extends TestCase
         $this->assertSame($expected, self::normaliseFromInput($input));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function normaliseUrlVectors(): iterable
     {
         foreach (CorpusLoader::load('normalise-url.json') as $vector) {
-            yield $vector['name'] => [$vector['input'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['input'], $vector['expected']];
         }
     }
 
@@ -51,34 +54,51 @@ final class CorpusComplianceTest extends TestCase
         $this->assertSame($normalised, self::normaliseFromInput($normalised));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function normaliseUrlIdempotencyVectors(): iterable
     {
         foreach (CorpusLoader::load('normalise-url.json') as $vector) {
             if (null === $vector['expected']) {
                 continue;
             }
-            yield $vector['name'] => [$vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawInput
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('buildRelaySetVectors')]
     public function testBuildRelaySet(array $rawInput, array $expected): void
     {
         $sources = array_map(
-            static fn (array $source) => array_map(RelayUrl::fromString(...), $source),
+            static fn (mixed $source): array => array_map(
+                static fn (mixed $url): ?RelayUrl => is_string($url) ? RelayUrl::tryFromString($url) : null,
+                self::expectList($source),
+            ),
             $rawInput,
         );
 
         $this->assertSame($expected, self::relayUrlsToStrings(RelaySetBuilder::build(...$sources)));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function buildRelaySetVectors(): iterable
     {
         foreach (CorpusLoader::load('build-relay-set.json') as $vector) {
-            yield $vector['name'] => [$vector['input'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['input'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawTags
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('extractRelayUrlsVectors')]
     public function testExtractRelayUrls(string $function, array $rawTags, array $expected): void
     {
@@ -95,10 +115,14 @@ final class CorpusComplianceTest extends TestCase
         $this->assertSame($expected, self::relayUrlsToStrings($actual));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function extractRelayUrlsVectors(): iterable
     {
         foreach (CorpusLoader::load('extract-relay-urls.json') as $vector) {
-            yield "{$vector['function']} — {$vector['name']}" => [
+            $label = self::expectString($vector['function']).' — '.self::expectString($vector['name']);
+            yield $label => [
                 $vector['function'],
                 $vector['tags'],
                 $vector['expected'],
@@ -106,6 +130,11 @@ final class CorpusComplianceTest extends TestCase
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawEvent
+     * @param array<string, mixed>    $rawContext
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('routePublishVectors')]
     public function testRoutePublish(array $rawEvent, array $rawContext, array $expected): void
     {
@@ -118,19 +147,26 @@ final class CorpusComplianceTest extends TestCase
             self::rawIntOr($rawContext, 'perRecipientCap', PublishContext::DEFAULT_PER_RECIPIENT_CAP),
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
         );
-        $route = RoutePublishService::route($event, $context);
+        $route = PublishRouter::route($event, $context);
 
         $this->assertSame($expected['branch'], $route->getBranch()->value);
         $this->assertSame($expected['relays'], self::relayUrlsToStrings($route->getRelays()));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function routePublishVectors(): iterable
     {
         foreach (CorpusLoader::load('route-publish.json') as $vector) {
-            yield $vector['name'] => [$vector['event'], $vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['event'], $vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawContext
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('routeReadVectors')]
     public function testRouteRead(array $rawContext, array $expected): void
     {
@@ -142,19 +178,26 @@ final class CorpusComplianceTest extends TestCase
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'searchRelays', [])),
         );
-        $route = RouteReadService::route($context);
+        $route = ReadRouter::route($context);
 
         $this->assertSame($expected['branch'], $route->getBranch()->value);
         $this->assertSame($expected['relays'], self::relayUrlsToStrings($route->getRelays()));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function routeReadVectors(): iterable
     {
         foreach (CorpusLoader::load('route-read.json') as $vector) {
-            yield $vector['name'] => [$vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawContext
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('routeAuthorReadsVectors')]
     public function testRouteAuthorReads(array $rawContext, array $expected): void
     {
@@ -166,7 +209,7 @@ final class CorpusComplianceTest extends TestCase
             self::rawNullableIntOr($rawContext, 'redundancy', AuthorReadRouteContext::DEFAULT_REDUNDANCY),
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
         );
-        $routes = RouteAuthorReadsService::route($context);
+        $routes = AuthorReadRouter::route($context);
         $actual = array_map(static fn ($route) => [
             'relays' => self::relayUrlsToStrings($route->getRelays()),
             'authorChunks' => array_map(self::pubkeysToHex(...), $route->getAuthorChunks()),
@@ -175,13 +218,20 @@ final class CorpusComplianceTest extends TestCase
         $this->assertSame($expected, $actual);
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function routeAuthorReadsVectors(): iterable
     {
         foreach (CorpusLoader::load('route-author-reads.json') as $vector) {
-            yield $vector['name'] => [$vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawContext
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('selectAuthorInboxRelaysVectors')]
     public function testSelectAuthorInboxRelays(array $rawContext, array $expected): void
     {
@@ -191,16 +241,23 @@ final class CorpusComplianceTest extends TestCase
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
         );
 
-        $this->assertSame($expected, self::relayUrlsToStrings(SelectAuthorRelaysService::inbox($context)));
+        $this->assertSame($expected, self::relayUrlsToStrings(AuthorRelaySelector::inbox($context)));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function selectAuthorInboxRelaysVectors(): iterable
     {
         foreach (CorpusLoader::load('select-author-inbox-relays.json') as $vector) {
-            yield $vector['name'] => [$vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawContext
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('selectZapRequestRelaysVectors')]
     public function testSelectZapRequestRelays(array $rawContext, array $expected): void
     {
@@ -211,16 +268,22 @@ final class CorpusComplianceTest extends TestCase
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
         );
 
-        $this->assertSame($expected, self::relayUrlsToStrings(SelectZapRequestRelaysService::select($context)));
+        $this->assertSame($expected, self::relayUrlsToStrings(ZapRequestRelaySelector::select($context)));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function selectZapRequestRelaysVectors(): iterable
     {
         foreach (CorpusLoader::load('select-zap-request-relays.json') as $vector) {
-            yield $vector['name'] => [$vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed> $rawContext
+     */
     #[DataProvider('selectRelayHintVectors')]
     public function testSelectRelayHint(array $rawContext, ?string $expected): void
     {
@@ -230,80 +293,103 @@ final class CorpusComplianceTest extends TestCase
             self::expectEvents($rawContext['relayListEvents']),
             self::expectRelayUrls(self::rawArrayOr($rawContext, 'blockedRelays', [])),
         );
-        $hint = SelectRelayHintService::select($context);
+        $hint = RelayHintSelector::select($context);
 
         $this->assertSame($expected, null !== $hint ? (string) $hint : null);
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function selectRelayHintVectors(): iterable
     {
         foreach (CorpusLoader::load('select-relay-hint.json') as $vector) {
-            yield $vector['name'] => [$vector['context'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['context'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed>    $rawEvent
+     * @param array<string, mixed>    $rawRelayListEvents
+     * @param array<array-key, mixed> $expected
+     */
     #[DataProvider('missingRelayListPubkeysVectors')]
     public function testMissingRelayListPubkeys(array $rawEvent, array $rawRelayListEvents, array $expected): void
     {
         $event = self::expectEvent($rawEvent);
         $relayListEvents = self::expectEvents($rawRelayListEvents);
 
-        $this->assertSame($expected, self::pubkeysToHex(MissingRelayListPubkeysService::find($event, $relayListEvents)));
+        $this->assertSame($expected, self::pubkeysToHex(MissingRelayListFinder::find($event, $relayListEvents)));
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function missingRelayListPubkeysVectors(): iterable
     {
         foreach (CorpusLoader::load('missing-relay-list-pubkeys.json') as $vector) {
-            yield $vector['name'] => [$vector['event'], $vector['relayListEvents'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['event'], $vector['relayListEvents'], $vector['expected']];
         }
     }
 
+    /**
+     * @param array<string, mixed> $rawFilters
+     */
     #[DataProvider('findFilterPatternVectors')]
     public function testFindFilterPattern(array $rawFilters, string $expected): void
     {
         $filters = self::expectFilters($rawFilters);
-        $this->assertSame($expected, FindFilterPatternService::classify($filters)->value);
+        $this->assertSame($expected, FilterPatternClassifier::classify($filters)->value);
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function findFilterPatternVectors(): iterable
     {
         foreach (CorpusLoader::load('find-filter-pattern.json') as $vector) {
-            yield $vector['name'] => [$vector['filters'], $vector['expected']];
+            yield self::expectString($vector['name']) => [$vector['filters'], $vector['expected']];
         }
     }
 
     #[DataProvider('createEventVectors')]
     public function testCreateEvent(mixed $input, bool $valid): void
     {
-        $event = Event::fromRaw($input);
+        $event = Event::tryFromRaw($input);
         $this->assertSame($valid, null !== $event);
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function createEventVectors(): iterable
     {
         foreach (CorpusLoader::load('create-event.json') as $vector) {
-            yield $vector['name'] => [$vector['input'], $vector['valid']];
+            yield self::expectString($vector['name']) => [$vector['input'], $vector['valid']];
         }
     }
 
     #[DataProvider('createFilterVectors')]
     public function testCreateFilter(mixed $input, bool $valid): void
     {
-        $filter = Filter::fromRaw($input);
+        $filter = Filter::tryFromRaw($input);
         $this->assertSame($valid, null !== $filter);
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function createFilterVectors(): iterable
     {
         foreach (CorpusLoader::load('create-filter.json') as $vector) {
-            yield $vector['name'] => [$vector['input'], $vector['valid']];
+            yield self::expectString($vector['name']) => [$vector['input'], $vector['valid']];
         }
     }
 
     #[DataProvider('classifyUrlVectors')]
     public function testClassifyUrl(string $input, bool $isOnion, bool $isLoopback, bool $isLocalAddr, bool $isInsecure): void
     {
-        $url = RelayUrl::fromString($input);
+        $url = RelayUrl::tryFromString($input);
         $this->assertNotNull($url, "expected $input to parse");
         $this->assertSame($isOnion, $url->isOnion(), 'isOnion');
         $this->assertSame($isLoopback, $url->isLoopback(), 'isLoopback');
@@ -311,10 +397,13 @@ final class CorpusComplianceTest extends TestCase
         $this->assertSame($isInsecure, $url->isInsecure(), 'isInsecure');
     }
 
+    /**
+     * @return iterable<string, list<mixed>>
+     */
     public static function classifyUrlVectors(): iterable
     {
         foreach (CorpusLoader::load('classify-url.json') as $vector) {
-            yield $vector['name'] => [
+            yield self::expectString($vector['name']) => [
                 $vector['input'],
                 $vector['isOnion'],
                 $vector['isLoopback'],
@@ -329,14 +418,35 @@ final class CorpusComplianceTest extends TestCase
         if (null === $input) {
             return null;
         }
-        $relay = RelayUrl::fromString($input);
+        $relay = RelayUrl::tryFromString($input);
 
         return null === $relay ? null : (string) $relay;
     }
 
-    private static function expectEvent(array $raw): Event
+    private static function expectString(mixed $raw): string
     {
-        $event = Event::fromRaw($raw);
+        if (!is_string($raw)) {
+            throw new RuntimeException('Expected a string in fixture, got '.get_debug_type($raw));
+        }
+
+        return $raw;
+    }
+
+    /**
+     * @return list<mixed>
+     */
+    private static function expectList(mixed $raw): array
+    {
+        if (!is_array($raw)) {
+            throw new RuntimeException('Expected a list in fixture, got '.get_debug_type($raw));
+        }
+
+        return array_values($raw);
+    }
+
+    private static function expectEvent(mixed $raw): Event
+    {
+        $event = Event::tryFromRaw($raw);
         if (null === $event) {
             throw new RuntimeException('Invalid event in fixture: '.json_encode($raw));
         }
@@ -344,44 +454,53 @@ final class CorpusComplianceTest extends TestCase
         return $event;
     }
 
-    private static function expectEvents(array $raw): array
+    /**
+     * @return list<Event>
+     */
+    private static function expectEvents(mixed $raw): array
     {
-        return array_map(self::expectEvent(...), $raw);
+        return array_map(self::expectEvent(...), self::expectList($raw));
     }
 
-    private static function expectPubkey(string $hex): PublicKey
+    private static function expectPubkey(mixed $hex): PublicKey
     {
-        $pubkey = PublicKey::fromHex($hex);
+        $pubkey = is_string($hex) ? PublicKey::tryFromHex($hex) : null;
         if (null === $pubkey) {
-            throw new RuntimeException(sprintf('Invalid pubkey in fixture: %s', $hex));
+            throw new RuntimeException('Invalid pubkey in fixture: '.get_debug_type($hex));
         }
 
         return $pubkey;
     }
 
-    private static function expectPubkeys(array $hexes): array
+    /**
+     * @return list<PublicKey>
+     */
+    private static function expectPubkeys(mixed $hexes): array
     {
-        return array_map(self::expectPubkey(...), $hexes);
+        return array_map(self::expectPubkey(...), self::expectList($hexes));
     }
 
-    private static function expectRelayUrls(array $urls): array
+    /**
+     * @return list<RelayUrl>
+     */
+    private static function expectRelayUrls(mixed $urls): array
     {
         return array_map(static function (mixed $url): RelayUrl {
             if (!is_string($url)) {
                 throw new RuntimeException('Relay URL in fixture must be a string');
             }
-            $relay = RelayUrl::fromString($url);
+            $relay = RelayUrl::tryFromString($url);
             if (null === $relay) {
                 throw new RuntimeException(sprintf('Invalid relay URL in fixture: %s', $url));
             }
 
             return $relay;
-        }, $urls);
+        }, self::expectList($urls));
     }
 
-    private static function expectTag(array $raw): Tag
+    private static function expectTag(mixed $raw): Tag
     {
-        $tag = Tag::fromRaw($raw);
+        $tag = Tag::tryFromRaw($raw);
         if (null === $tag) {
             throw new RuntimeException('Invalid tag in fixture: '.json_encode($raw));
         }
@@ -389,14 +508,17 @@ final class CorpusComplianceTest extends TestCase
         return $tag;
     }
 
-    private static function expectTags(array $raw): array
+    /**
+     * @return list<Tag>
+     */
+    private static function expectTags(mixed $raw): array
     {
-        return array_map(self::expectTag(...), $raw);
+        return array_map(self::expectTag(...), self::expectList($raw));
     }
 
-    private static function expectFilter(array $raw): Filter
+    private static function expectFilter(mixed $raw): Filter
     {
-        $filter = Filter::fromRaw($raw);
+        $filter = Filter::tryFromRaw($raw);
         if (null === $filter) {
             throw new RuntimeException('Invalid filter in fixture: '.json_encode($raw));
         }
@@ -404,11 +526,22 @@ final class CorpusComplianceTest extends TestCase
         return $filter;
     }
 
-    private static function expectFilters(array $raw): array
+    /**
+     * @return list<Filter>
+     */
+    private static function expectFilters(mixed $raw): array
     {
-        return array_map(self::expectFilter(...), $raw);
+        return array_map(self::expectFilter(...), self::expectList($raw));
     }
 
+    /**
+     * @param ?array<string, mixed> $relays
+     */
+    /**
+     * @param ?list<RelayUrl> $relays
+     *
+     * @return ?list<string>
+     */
     private static function relayUrlsToStrings(?array $relays): ?array
     {
         if (null === $relays) {
@@ -418,11 +551,29 @@ final class CorpusComplianceTest extends TestCase
         return array_map(static fn (RelayUrl $r) => (string) $r, $relays);
     }
 
+    /**
+     * @param array<string, mixed> $pubkeys
+     */
+    /**
+     * @param list<PublicKey> $pubkeys
+     *
+     * @return list<string>
+     */
     private static function pubkeysToHex(array $pubkeys): array
     {
         return array_map(static fn (PublicKey $p) => $p->toHex(), $pubkeys);
     }
 
+    /**
+     * @param array<string, mixed> $raw
+     * @param array<string, mixed> $default
+     */
+    /**
+     * @param array<string, mixed>    $raw
+     * @param array<array-key, mixed> $default
+     *
+     * @return array<array-key, mixed>
+     */
     private static function rawArrayOr(array $raw, string $key, array $default): array
     {
         if (!array_key_exists($key, $raw)) {
@@ -433,6 +584,12 @@ final class CorpusComplianceTest extends TestCase
         return is_array($value) ? $value : $default;
     }
 
+    /**
+     * @param array<string, mixed> $raw
+     */
+    /**
+     * @param array<string, mixed> $raw
+     */
     private static function rawIntOr(array $raw, string $key, int $default): int
     {
         if (!array_key_exists($key, $raw)) {
@@ -443,6 +600,12 @@ final class CorpusComplianceTest extends TestCase
         return is_int($value) ? $value : $default;
     }
 
+    /**
+     * @param array<string, mixed> $raw
+     */
+    /**
+     * @param array<string, mixed> $raw
+     */
     private static function rawNullableIntOr(array $raw, string $key, ?int $default): ?int
     {
         if (!array_key_exists($key, $raw)) {

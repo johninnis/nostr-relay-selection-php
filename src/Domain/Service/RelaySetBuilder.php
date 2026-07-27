@@ -8,6 +8,11 @@ use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 
 final class RelaySetBuilder
 {
+    /**
+     * @param array<array-key, mixed> ...$sources
+     *
+     * @return list<RelayUrl>
+     */
     public static function build(array ...$sources): array
     {
         $seen = [];
@@ -29,21 +34,19 @@ final class RelaySetBuilder
         return $result;
     }
 
+    /**
+     * @param array<array-key, mixed> $relays
+     * @param array<array-key, mixed> $blocked
+     *
+     * @return list<RelayUrl>
+     */
     public static function subtract(array $relays, array $blocked): array
     {
-        if ([] === $blocked) {
-            return $relays;
-        }
-
         $blockedKeys = [];
         foreach ($blocked as $url) {
             if ($url instanceof RelayUrl) {
                 $blockedKeys[(string) $url] = true;
             }
-        }
-
-        if ([] === $blockedKeys) {
-            return $relays;
         }
 
         $result = [];

@@ -2,11 +2,7 @@
 
 declare(strict_types=1);
 
-// Minimal duplicate of innis/nostr-core's Event entity, scoped to the fields
-// relay selection consumes (kind, pubkey, created_at, tags). innis/nostr-relay-selection
-// must not depend on innis/nostr-core, so the type is re-declared here. There is
-// no signature, no id, no content — relay routing reads only protocol-level
-// fields.
+// Deliberate: re-declared rather than taken from nostr-core — see ADR-0002
 
 namespace Innis\Nostr\RelaySelection\Domain\Entity;
 
@@ -16,8 +12,13 @@ use InvalidArgumentException;
 
 final readonly class Event
 {
+    /** @var list<Tag> */
     private array $tags;
 
+    // Deliberate: the four fields are the protocol record's own shape, not a hidden responsibility — see ADR-0001
+    /**
+     * @param array<array-key, mixed> $tags
+     */
     public function __construct(
         private int $kind,
         private PublicKey $pubkey,
@@ -47,12 +48,15 @@ final readonly class Event
         return $this->createdAt;
     }
 
+    /**
+     * @return list<Tag>
+     */
     public function getTags(): array
     {
         return $this->tags;
     }
 
-    public static function fromRaw(mixed $raw): ?self
+    public static function tryFromRaw(mixed $raw): ?self
     {
         if (!is_array($raw)) {
             return null;
@@ -63,13 +67,13 @@ final readonly class Event
         if (!is_int($raw['kind']) || !is_int($raw['created_at']) || !is_string($raw['pubkey']) || !is_array($raw['tags'])) {
             return null;
         }
-        $pubkey = PublicKey::fromHex($raw['pubkey']);
+        $pubkey = PublicKey::tryFromHex($raw['pubkey']);
         if (null === $pubkey) {
             return null;
         }
         $tags = [];
         foreach ($raw['tags'] as $rawTag) {
-            $tag = Tag::fromRaw($rawTag);
+            $tag = Tag::tryFromRaw($rawTag);
             if (null === $tag) {
                 return null;
             }

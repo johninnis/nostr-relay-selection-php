@@ -8,17 +8,18 @@ use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
 use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\ReadContext;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\ReadRoute;
 
-final class RouteReadService
+final class ReadRouter
 {
     public static function route(ReadContext $context): ReadRoute
     {
-        $branch = FindFilterPatternService::classify($context->getFilters());
+        $branch = FilterPatternClassifier::classify($context->getFilters());
         if (ReadBranch::DmInbox === $branch) {
             $relays = self::dmInboxRelays(
                 $context,
-                FindFilterPatternService::sharedGiftWrapRecipient($context->getFilters()),
+                FilterPatternClassifier::sharedGiftWrapRecipient($context->getFilters()),
             );
             if (null === $relays) {
                 return new ReadRoute($branch, null);
@@ -39,6 +40,9 @@ final class RouteReadService
         return new ReadRoute($branch, RelaySetBuilder::subtract($relays, $context->getBlockedRelays()));
     }
 
+    /**
+     * @return ?list<RelayUrl>
+     */
     private static function dmInboxRelays(ReadContext $context, ?PublicKey $recipient): ?array
     {
         if (null === $recipient) {

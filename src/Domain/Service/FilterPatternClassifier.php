@@ -9,8 +9,11 @@ use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
 use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
 
-final class FindFilterPatternService
+final class FilterPatternClassifier
 {
+    /**
+     * @param array<array-key, mixed> $filters
+     */
     public static function classify(array $filters): ReadBranch
     {
         if (self::hasSearchFilter($filters)) {
@@ -24,6 +27,9 @@ final class FindFilterPatternService
         return ReadBranch::General;
     }
 
+    /**
+     * @param array<array-key, mixed> $filters
+     */
     public static function sharedGiftWrapRecipient(array $filters): ?PublicKey
     {
         if ([] === $filters) {
@@ -54,6 +60,9 @@ final class FindFilterPatternService
         return $shared;
     }
 
+    /**
+     * @param array<array-key, mixed> $filters
+     */
     private static function hasSearchFilter(array $filters): bool
     {
         foreach ($filters as $filter) {
