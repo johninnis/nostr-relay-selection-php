@@ -358,6 +358,8 @@ composer test          # Unit + Compliance + PHPStan (ship gate)
 composer test-unit     # Unit suite only
 composer analyse       # PHPStan level 9
 composer fix-style     # php-cs-fixer
+composer check-style   # php-cs-fixer, dry run (CI gate)
+composer check-rector  # Rector 8.4 modernisation, dry run (CI gate)
 ```
 
 The compliance suite loads JSON test vectors under `tests/corpus/`. The corpus is the spec — any divergence between implementations is a test failure.
