@@ -4,60 +4,69 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\Service;
 
-use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
+use Innis\Nostr\RelaySelection\Domain\Collection\FilterCollection;
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
+use Innis\Nostr\RelaySelection\Domain\Enum\RelayRole;
 use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\ReadContext;
+use Innis\Nostr\RelaySelection\Domain\Failure\NoDmRelaysFailure;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Policy\ReadPolicy;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\Filter;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\ReadRoute;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\RelayDirectory;
 
 final class ReadRouter
 {
-    public static function route(ReadContext $context): ReadRoute
+    public static function route(FilterCollection $filters, RelayDirectory $directory, ReadPolicy $policy): ReadRoute|NoDmRelaysFailure
     {
-        $branch = FilterPatternClassifier::classify($context->getFilters());
-        if (ReadBranch::DmInbox === $branch) {
-            $relays = self::dmInboxRelays(
-                $context,
-                FilterPatternClassifier::sharedGiftWrapRecipient($context->getFilters()),
-            );
-            if (null === $relays) {
-                return new ReadRoute($branch, null);
-            }
-            $afterBlock = RelaySetBuilder::subtract($relays, $context->getBlockedRelays());
+        $pattern = FilterPatternClassifier::classify($filters);
+        $recipient = $pattern->getDmRecipient();
+        if (null !== $recipient) {
+            $relays = $directory->relaysOf($recipient, RelayRole::Dm);
 
-            return new ReadRoute($branch, [] === $afterBlock ? null : $afterBlock);
+            return $relays->isEmpty() ? NoDmRelaysFailure::NoDmRelays : new ReadRoute(ReadBranch::DmInbox, $relays);
+        }
+        $user = $policy->getUserPubkey();
+        if (ReadBranch::Search === $pattern->getBranch()) {
+            return new ReadRoute(ReadBranch::Search, $directory->permitted(
+                $directory->relaysOf($user, RelayRole::Search),
+                $policy->getCallerRelays(),
+            ));
         }
 
-        $relays = match ($branch) {
-            ReadBranch::Search => RelaySetBuilder::build($context->getSearchRelays(), $context->getCallerRelays()),
-            ReadBranch::General => RelaySetBuilder::build(
-                $context->getUserRelayUrls(),
-                $context->getCallerRelays(),
-            ),
-        };
+        return new ReadRoute(ReadBranch::General, self::generalRelays($filters, $directory, $policy));
+    }
 
-        return new ReadRoute($branch, RelaySetBuilder::subtract($relays, $context->getBlockedRelays()));
+    private static function generalRelays(FilterCollection $filters, RelayDirectory $directory, ReadPolicy $policy): RelaySet
+    {
+        $tagged = self::taggedOf($filters);
+        $taggedInboxes = array_map(
+            static fn (PublicKey $pubkey): RelaySet => $directory->relaysOf($pubkey, RelayRole::Inbox),
+            $tagged,
+        );
+        $needsUserRelays = [] === $tagged
+            || array_any($filters->toArray(), static fn (Filter $filter): bool => ($filter->getPTags()?->isEmpty() ?? true))
+            || array_any($taggedInboxes, static fn (RelaySet $inbox): bool => $inbox->isEmpty());
+        $user = $policy->getUserPubkey();
+        $userRelays = $needsUserRelays
+            ? [$directory->relaysOf($user, RelayRole::Inbox), $directory->relaysOf($user, RelayRole::Outbox)]
+            : [];
+
+        return $directory->permitted(...[...$taggedInboxes, ...$userRelays, $policy->getCallerRelays()]);
     }
 
     /**
-     * @return ?list<RelayUrl>
+     * @return list<PublicKey>
      */
-    private static function dmInboxRelays(ReadContext $context, ?PublicKey $recipient): ?array
+    private static function taggedOf(FilterCollection $filters): array
     {
-        if (null === $recipient) {
-            return null;
+        $tagged = [];
+        foreach ($filters as $filter) {
+            foreach ($filter->getPTags() ?? [] as $pubkey) {
+                $tagged[$pubkey->toHex()] ??= $pubkey;
+            }
         }
-        $list = EventSelector::newestByPubkeyAndKind(
-            $context->getRelayListEvents(),
-            $recipient,
-            EventKind::DmRelayList->value,
-        );
-        if (null === $list) {
-            return null;
-        }
-        $relays = RelaySetBuilder::build(RelayListExtractor::dm($list->getTags()));
 
-        return [] === $relays ? null : $relays;
+        return array_values($tagged);
     }
 }

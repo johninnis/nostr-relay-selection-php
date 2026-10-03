@@ -4,17 +4,14 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\ValueObject\Route;
 
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
 use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 
 final readonly class ReadRoute
 {
-    /**
-     * @param ?list<RelayUrl> $relays
-     */
     public function __construct(
         private ReadBranch $branch,
-        private ?array $relays,
+        private RelaySet $relays,
     ) {
     }
 
@@ -23,10 +20,7 @@ final readonly class ReadRoute
         return $this->branch;
     }
 
-    /**
-     * @return ?list<RelayUrl>
-     */
-    public function getRelays(): ?array
+    public function getRelays(): RelaySet
     {
         return $this->relays;
     }

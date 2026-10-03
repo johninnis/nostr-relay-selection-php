@@ -4,194 +4,85 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\Service;
 
-use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorReadRouteContext;
+use Innis\Nostr\RelaySelection\Domain\Collection\AuthorReadRouteCollection;
+use Innis\Nostr\RelaySelection\Domain\Collection\PublicKeyCollection;
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
+use Innis\Nostr\RelaySelection\Domain\Enum\RelayRole;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Policy\AuthorReadPolicy;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Policy\PositiveCount;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Policy\Redundancy;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\AuthorReadRoute;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\RelayDirectory;
 
 final class AuthorReadRouter
 {
-    /**
-     * @return list<AuthorReadRoute>
-     */
-    public static function route(AuthorReadRouteContext $context): array
-    {
-        $uniqueAuthors = self::deduplicate($context->getAuthorPubkeys());
-        $cap = $context->getMaxAuthorsPerFilter();
-        $target = $context->getRedundancy();
-        $blocked = $context->getBlockedRelays();
-
-        $relayToAuthors = self::filterBlocked(
-            self::buildRelayToAuthorsMap($uniqueAuthors, $context),
-            $blocked,
+    public static function route(
+        PublicKeyCollection $authors,
+        RelayDirectory $directory,
+        AuthorReadPolicy $policy = new AuthorReadPolicy(),
+    ): AuthorReadRouteCollection {
+        $outboxes = [];
+        foreach ($authors as $author) {
+            $outboxes[$author->toHex()] ??= ['author' => $author, 'outbox' => $directory->relaysOf($author, RelayRole::Outbox)];
+        }
+        $chunkSize = $policy->getMaxAuthorsPerFilter();
+        $routes = array_map(
+            static fn (array $pick): AuthorReadRoute => new AuthorReadRoute(new RelaySet([$pick['relay']]), self::chunk($pick['authors'], $chunkSize)),
+            self::greedyCover(self::candidatesOf($outboxes), $policy->getRedundancy()),
         );
-        $authorsWithRelays = self::collectAuthorsWithRelays($relayToAuthors);
-        $maxCoverByAuthor = self::buildMaxCoverByAuthor($relayToAuthors);
-
-        $picks = self::greedySetCover($relayToAuthors, $maxCoverByAuthor, $target);
-        $routes = self::picksToRoutes($picks, $cap);
-
-        $authorsWithoutRelays = self::filterAuthorsWithoutRelays($uniqueAuthors, $authorsWithRelays);
-        if ([] !== $authorsWithoutRelays) {
-            $fallback = RelaySetBuilder::subtract($context->getFallbackRelays(), $blocked);
-            $routes[] = new AuthorReadRoute($fallback, self::chunkPubkeys($authorsWithoutRelays, $cap));
+        $uncovered = array_values(array_map(
+            static fn (array $entry): PublicKey => $entry['author'],
+            array_filter($outboxes, static fn (array $entry): bool => $entry['outbox']->isEmpty()),
+        ));
+        $fallback = $directory->permitted($policy->getFallbackRelays());
+        if ([] !== $uncovered && !$fallback->isEmpty()) {
+            $routes[] = new AuthorReadRoute($fallback, self::chunk($uncovered, $chunkSize));
         }
 
-        return $routes;
+        return new AuthorReadRouteCollection($routes);
     }
 
     /**
-     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
-     * @param list<RelayUrl>                                                           $blocked
-     *
-     * @return array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}>
-     */
-    private static function filterBlocked(array $relayToAuthors, array $blocked): array
-    {
-        if ([] === $blocked) {
-            return $relayToAuthors;
-        }
-        $blockedKeys = [];
-        foreach ($blocked as $url) {
-            $blockedKeys[(string) $url] = true;
-        }
-        foreach (array_keys($relayToAuthors) as $key) {
-            if (isset($blockedKeys[$key])) {
-                unset($relayToAuthors[$key]);
-            }
-        }
-
-        return $relayToAuthors;
-    }
-
-    /**
-     * @param list<PublicKey> $authors
-     *
-     * @return list<PublicKey>
-     */
-    private static function deduplicate(array $authors): array
-    {
-        $seen = [];
-        $unique = [];
-        foreach ($authors as $author) {
-            $hex = $author->toHex();
-            if (isset($seen[$hex])) {
-                continue;
-            }
-            $seen[$hex] = true;
-            $unique[] = $author;
-        }
-
-        return $unique;
-    }
-
-    /**
-     * @param list<PublicKey> $authors
-     *
-     * @return array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}>
-     */
-    private static function buildRelayToAuthorsMap(array $authors, AuthorReadRouteContext $context): array
-    {
-        $map = [];
-        foreach ($authors as $author) {
-            $list = EventSelector::newestByPubkeyAndKind(
-                $context->getRelayListEvents(),
-                $author,
-                EventKind::RelayList->value,
-            );
-            if (null === $list) {
-                continue;
-            }
-            $outbox = RelayListExtractor::outbox($list->getTags());
-            if ([] === $outbox) {
-                continue;
-            }
-            foreach ($outbox as $relay) {
-                $key = (string) $relay;
-                if (!isset($map[$key])) {
-                    $map[$key] = ['relay' => $relay, 'authors' => []];
-                }
-                $map[$key]['authors'][$author->toHex()] = $author;
-            }
-        }
-
-        return $map;
-    }
-
-    /**
-     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
-     *
-     * @return array<string, true>
-     */
-    private static function collectAuthorsWithRelays(array $relayToAuthors): array
-    {
-        $set = [];
-        foreach ($relayToAuthors as $entry) {
-            foreach ($entry['authors'] as $hex => $_pubkey) {
-                $set[$hex] = true;
-            }
-        }
-
-        return $set;
-    }
-
-    /**
-     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
-     *
-     * @return array<string, int>
-     */
-    private static function buildMaxCoverByAuthor(array $relayToAuthors): array
-    {
-        $counts = [];
-        foreach ($relayToAuthors as $entry) {
-            foreach ($entry['authors'] as $hex => $_pubkey) {
-                $counts[$hex] = ($counts[$hex] ?? 0) + 1;
-            }
-        }
-
-        return $counts;
-    }
-
-    /**
-     * @param array<string, array{relay: RelayUrl, authors: array<string, PublicKey>}> $relayToAuthors
-     * @param array<string, int>                                                       $maxCoverByAuthor
+     * @param array<string, array{author: PublicKey, outbox: RelaySet}> $outboxes
      *
      * @return list<array{relay: RelayUrl, authors: list<PublicKey>}>
      */
-    private static function greedySetCover(array $relayToAuthors, array $maxCoverByAuthor, ?int $target): array
+    private static function candidatesOf(array $outboxes): array
     {
-        $coverByAuthor = [];
-        $remaining = $relayToAuthors;
-        $picks = [];
+        $candidates = [];
+        foreach ($outboxes as $entry) {
+            foreach ($entry['outbox'] as $relay) {
+                $candidates[(string) $relay] ??= ['relay' => $relay, 'authors' => []];
+                $candidates[(string) $relay]['authors'][] = $entry['author'];
+            }
+        }
 
-        while ([] !== $remaining) {
-            $bestKey = null;
-            $bestRelay = null;
-            $bestAuthors = [];
-            foreach ($remaining as $key => $entry) {
-                $needed = [];
-                foreach ($entry['authors'] as $hex => $pubkey) {
-                    $maxCover = $maxCoverByAuthor[$hex] ?? 0;
-                    $authorTarget = null === $target ? $maxCover : min($target, $maxCover);
-                    if (($coverByAuthor[$hex] ?? 0) < $authorTarget) {
-                        $needed[] = $pubkey;
-                    }
-                }
-                if (count($needed) > count($bestAuthors)) {
-                    $bestKey = $key;
-                    $bestRelay = $entry['relay'];
-                    $bestAuthors = $needed;
-                }
-            }
-            if (null === $bestKey || null === $bestRelay || [] === $bestAuthors) {
-                break;
-            }
-            $picks[] = ['relay' => $bestRelay, 'authors' => $bestAuthors];
-            unset($remaining[$bestKey]);
-            foreach ($bestAuthors as $pubkey) {
-                $hex = $pubkey->toHex();
-                $coverByAuthor[$hex] = ($coverByAuthor[$hex] ?? 0) + 1;
+        return array_values($candidates);
+    }
+
+    /*
+     * Greedy set cover: repeatedly pick the relay that reaches the most authors who
+     * are still below the redundancy target, until no relay reaches such an author.
+     * Ties go to the relay seen first, so the plan is deterministic.
+     */
+    /**
+     * @param list<array{relay: RelayUrl, authors: list<PublicKey>}> $candidates
+     *
+     * @return list<array{relay: RelayUrl, authors: list<PublicKey>}>
+     */
+    private static function greedyCover(array $candidates, Redundancy $redundancy): array
+    {
+        $coverage = [];
+        $picks = [];
+        $remaining = $candidates;
+        while (null !== ($best = self::bestOf(self::stillNeeding($remaining, $coverage, $redundancy)))) {
+            $picks[] = $best;
+            $picked = (string) $best['relay'];
+            $remaining = array_values(array_filter($remaining, static fn (array $candidate): bool => (string) $candidate['relay'] !== $picked));
+            foreach ($best['authors'] as $author) {
+                $coverage[$author->toHex()] = ($coverage[$author->toHex()] ?? 0) + 1;
             }
         }
 
@@ -199,49 +90,49 @@ final class AuthorReadRouter
     }
 
     /**
-     * @param list<array{relay: RelayUrl, authors: list<PublicKey>}> $picks
+     * @param list<array{relay: RelayUrl, authors: list<PublicKey>}> $candidates
+     * @param array<string, int>                                     $coverage
      *
-     * @return list<AuthorReadRoute>
+     * @return list<array{relay: RelayUrl, authors: list<PublicKey>}>
      */
-    private static function picksToRoutes(array $picks, int $cap): array
+    private static function stillNeeding(array $candidates, array $coverage, Redundancy $redundancy): array
     {
-        $routes = [];
-        foreach ($picks as $pick) {
-            $routes[] = new AuthorReadRoute([$pick['relay']], self::chunkPubkeys($pick['authors'], $cap));
-        }
-
-        return $routes;
+        return array_map(static fn (array $candidate): array => [
+            'relay' => $candidate['relay'],
+            'authors' => array_values(array_filter(
+                $candidate['authors'],
+                static fn (PublicKey $author): bool => !$redundancy->isReachedAt($coverage[$author->toHex()] ?? 0),
+            )),
+        ], $candidates);
     }
 
     /**
-     * @param list<PublicKey>     $authors
-     * @param array<string, true> $authorsWithRelays
+     * @param list<array{relay: RelayUrl, authors: list<PublicKey>}> $candidates
      *
-     * @return list<PublicKey>
+     * @return ?array{relay: RelayUrl, authors: list<PublicKey>}
      */
-    private static function filterAuthorsWithoutRelays(array $authors, array $authorsWithRelays): array
+    private static function bestOf(array $candidates): ?array
     {
-        $result = [];
-        foreach ($authors as $author) {
-            if (!isset($authorsWithRelays[$author->toHex()])) {
-                $result[] = $author;
+        $best = null;
+        foreach ($candidates as $candidate) {
+            if (count($candidate['authors']) > count($best['authors'] ?? [])) {
+                $best = $candidate;
             }
         }
 
-        return $result;
+        return $best;
     }
 
     /**
-     * @param array<array-key, PublicKey> $items
+     * @param list<PublicKey> $authors
      *
-     * @return list<list<PublicKey>>
+     * @return list<PublicKeyCollection>
      */
-    private static function chunkPubkeys(array $items, int $size): array
+    private static function chunk(array $authors, PositiveCount $size): array
     {
-        if ($size <= 0 || count($items) <= $size) {
-            return [array_values($items)];
-        }
-
-        return array_chunk($items, $size);
+        return array_map(
+            static fn (array $chunk): PublicKeyCollection => new PublicKeyCollection($chunk),
+            array_chunk($authors, $size->getValue()),
+        );
     }
 }

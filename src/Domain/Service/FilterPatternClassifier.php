@@ -4,73 +4,41 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\Service;
 
-use Innis\Nostr\RelaySelection\Domain\Entity\Filter;
+use Innis\Nostr\RelaySelection\Domain\Collection\FilterCollection;
 use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
-use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\Filter;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\FilterPattern;
 
 final class FilterPatternClassifier
 {
-    /**
-     * @param array<array-key, mixed> $filters
-     */
-    public static function classify(array $filters): ReadBranch
+    public static function classify(FilterCollection $filters): FilterPattern
     {
-        if (self::hasSearchFilter($filters)) {
-            return ReadBranch::Search;
+        if (array_any($filters->toArray(), static fn (Filter $filter): bool => $filter->hasSearch())) {
+            return FilterPattern::search();
         }
+        $recipient = self::sharedGiftWrapRecipient($filters);
 
-        if (null !== self::sharedGiftWrapRecipient($filters)) {
-            return ReadBranch::DmInbox;
-        }
-
-        return ReadBranch::General;
+        return null === $recipient ? FilterPattern::general() : FilterPattern::dmInbox($recipient);
     }
 
-    /**
-     * @param array<array-key, mixed> $filters
-     */
-    public static function sharedGiftWrapRecipient(array $filters): ?PublicKey
+    private static function sharedGiftWrapRecipient(FilterCollection $filters): ?PublicKey
     {
-        if ([] === $filters) {
+        $recipients = array_map(self::giftWrapRecipientOf(...), $filters->toArray());
+        $first = $recipients[0] ?? null;
+        if (null === $first) {
             return null;
         }
 
-        $shared = null;
-        foreach ($filters as $filter) {
-            if (!$filter instanceof Filter) {
-                return null;
-            }
-            $kinds = $filter->getKinds();
-            if (null === $kinds || 1 !== count($kinds) || EventKind::GiftWrap->value !== $kinds[0]) {
-                return null;
-            }
-            $pTags = $filter->getPTags();
-            if (null === $pTags || 1 !== count($pTags)) {
-                return null;
-            }
-            $pubkey = $pTags[0];
-            if (null === $shared) {
-                $shared = $pubkey;
-            } elseif (!$shared->equals($pubkey)) {
-                return null;
-            }
-        }
-
-        return $shared;
+        return array_all($recipients, static fn (?PublicKey $recipient): bool => null !== $recipient && $recipient->equals($first)) ? $first : null;
     }
 
-    /**
-     * @param array<array-key, mixed> $filters
-     */
-    private static function hasSearchFilter(array $filters): bool
+    private static function giftWrapRecipientOf(Filter $filter): ?PublicKey
     {
-        foreach ($filters as $filter) {
-            if ($filter instanceof Filter && $filter->hasSearch()) {
-                return true;
-            }
-        }
+        $recipients = $filter->getPTags()?->toArray() ?? [];
+        $kinds = $filter->getKinds() ?? [];
+        $isGiftWrapOnly = [] !== $kinds && array_all($kinds, static fn (int $kind): bool => EventKind::tryFrom($kind)?->isGiftWrap() ?? false);
 
-        return false;
+        return $isGiftWrapOnly && 1 === count($recipients) ? $recipients[0] : null;
     }
 }

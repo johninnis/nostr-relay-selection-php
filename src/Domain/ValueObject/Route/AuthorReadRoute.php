@@ -4,31 +4,31 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\ValueObject\Route;
 
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
+use Innis\Nostr\RelaySelection\Domain\Collection\PublicKeyCollection;
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
+use InvalidArgumentException;
 
 final readonly class AuthorReadRoute
 {
     /**
-     * @param list<RelayUrl>        $relays
-     * @param list<list<PublicKey>> $authorChunks
+     * @param list<PublicKeyCollection> $authorChunks
      */
     public function __construct(
-        private array $relays,
+        private RelaySet $relays,
         private array $authorChunks,
     ) {
+        if ($relays->isEmpty()) {
+            throw new InvalidArgumentException('An author read route must name at least one relay');
+        }
     }
 
-    /**
-     * @return list<RelayUrl>
-     */
-    public function getRelays(): array
+    public function getRelays(): RelaySet
     {
         return $this->relays;
     }
 
     /**
-     * @return list<list<PublicKey>>
+     * @return list<PublicKeyCollection>
      */
     public function getAuthorChunks(): array
     {

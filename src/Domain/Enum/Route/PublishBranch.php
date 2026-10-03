@@ -9,4 +9,5 @@ enum PublishBranch: string
     case General = 'general';
     case Dm = 'dm';
     case Draft = 'draft';
+    case Group = 'group';
 }

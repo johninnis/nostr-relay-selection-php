@@ -2,34 +2,18 @@
 
 [![CI](https://github.com/johninnis/nostr-relay-selection-php/actions/workflows/ci.yml/badge.svg)](https://github.com/johninnis/nostr-relay-selection-php/actions/workflows/ci.yml)
 
-A PHP library for routing Nostr events to and from relays. Implements outbox-model publish routing, read routing, author-set-cover, relay hint selection, NIP-65 inbox/outbox/DM list parsing, NIP-17 DM-inbox handling, and URL classification — as pure functions, with zero runtime dependencies.
+Deterministic outbox-model relay routing for Nostr in PHP: publish routing, read routing, author set cover, relay hints, zap-request relays and URL classification, as pure functions with zero runtime dependencies. A routing policy locked to a shared JSON corpus, not an engine.
 
 ## Why this library?
 
-When a client publishes a kind 1 reply, *which* relays should it actually send to? When it queries an author's notes, which relays will return them? When it picks a relay hint for an `e` tag, which one will work for the recipient? These are not trivial questions in the outbox model.
+When a client publishes a reply, which relays should it send to? When it reads an author's notes, which relays hold them? Which relay hint will work for the person a tag points at? This library answers those questions from the relay lists people publish (NIP-65, NIP-17, NIP-51), deterministically: the same inputs always give the same relays in the same order. It opens no connections, keeps no state and ships no default relays; your relay pool and your fallbacks wrap it. Why it is built that way is recorded in [ADR-0006](docs/adr/0006-the-library-is-a-routing-policy-not-an-engine.md).
 
-`innis/nostr-relay-selection` answers them as pure functions over the user's relay-list events. It does not open WebSocket connections, does not depend on a relay pool, does not depend on `innis/nostr-core`, and does not depend on any other Nostr library. Feed it events and a context, get back a deterministic list of relays.
-
-## Design reasoning: a spec, not an engine
-
-The Nostr ecosystem already has several relay-selection implementations — NDK's `OutboxTracker`, rust-nostr's `gossip` crate, go-nostr's `sdk` hints DB, Coracle's `welshman/router`. They are all *engines*: stateful, heuristic, async, coupled to a pool and to learned data. They make pragmatic, useful tradeoffs, and none of them are deterministic.
-
-This library makes the opposite tradeoff. It is a *policy specification*:
-
-- **Pure functions.** Every operation is a stateless static method. Same inputs, same outputs. No I/O, no time, no randomness.
-- **Deterministic by construction.** No `Math.random()` tie-breaks (welshman), no time-decay scoring (go-nostr), no `received_events` counters (rust-nostr), no batch-popularity sort (NDK), no hardcoded fallback URLs.
-- **NIP-derived behaviour only.** Every routing decision is grounded in a NIP — NIP-65 for kind 10002, NIP-17 for kind 10050, NIP-57 for zap requests, NIP-50 for search relays. No empirical heuristics that drift from the spec.
-- **Zero runtime dependencies.** Requires only PHP 8.4. Suitable for embedding in any Nostr client, relay, indexer, or back-end without dragging in transport, crypto, caches, or framework code.
-- **Clean Architecture, domain-only.** All logic lives in the Domain layer. There is no Application or Infrastructure layer because there is nothing external to coordinate.
-- **Behaviour locked to a JSON corpus.** The test vectors under `tests/corpus/` are the spec. Any implementation in any language that passes every vector is conformant. The PHP and TypeScript ports share the corpus; a Go, Kotlin, or Rust port would too.
-
-Engines and specs compose. This library is the policy; an engine wraps it with caching, pool state, fallbacks, scoring, or whatever else a runtime needs. The two layers stay separate so the policy stays portable and auditable.
+The TypeScript port, [`@innis/nostr-relay-selection`](https://jsr.io/@innis/nostr-relay-selection), implements the same policy against the same corpus.
 
 ## Requirements
 
 - PHP 8.4 or higher
-
-No PHP extensions are required. No system libraries. No Composer dependencies.
+- No extensions, system libraries or Composer dependencies
 
 ## Installation
 
@@ -37,345 +21,206 @@ No PHP extensions are required. No system libraries. No Composer dependencies.
 composer require innis/nostr-relay-selection
 ```
 
-## Quick Start
-
-All services are pure static methods. Inputs are typed context objects; outputs are typed route objects (with a branch enum + a list of `RelayUrl`) or lists of `RelayUrl` directly.
-
-For a runnable end-to-end demonstration against live relay-list events from four real Nostr identities (loaded from `tests/corpus/real-world/`), see [`example.php`](example.php):
-
-```bash
-php example.php
-```
-
-### Constructing typed objects from raw JSON
-
-Every type the routing services consume has a static `fromRaw(mixed): ?self` factory that validates the JSON-shaped input and returns `null` on malformed data:
+## Quick start
 
 ```php
-use Innis\Nostr\RelaySelection\Domain\Entity\Event;
-use Innis\Nostr\RelaySelection\Domain\Entity\Filter;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Tag;
-
-$event  = Event::tryFromRaw(json_decode($rawJson, true));   // ?Event
-$filter = Filter::tryFromRaw(['kinds' => [1], 'search' => 'hi']);  // ?Filter
-$tag    = Tag::tryFromRaw(['p', $pubkeyHex]);               // ?Tag
-$pubkey = PublicKey::tryFromHex($hex);                      // ?PublicKey
-$relay  = RelayUrl::tryFromString($url);                    // ?RelayUrl
-```
-
-Use these at your application's adapter boundary. The lib never returns `null` from happy-path routing — `null` from `fromRaw`/`fromHex`/`fromString` always means "the input you gave me was not a valid X."
-
-### Route a publish
-
-Given an event and the user's relay-list events (kind 10002 / 10050), decide which relays to publish to. Returns a `PublishRoute` whose `getBranch()` reports the policy applied and whose `getRelays()` lists the targets (which may be empty, or `null` for the `Dm` branch — see below).
-
-- `PublishBranch::General` — NIP-65 outbox routing for kind 1/6/7/16/24/1111/9802 etc. Fans out to recipient inboxes (capped per recipient). Adds `indexerRelays` for indexed kinds (0, 3, 10002, 10050) — the events indexers like `purplepag.es` harvest.
-- `PublishBranch::Dm` — NIP-17 routing for kind 1059 gift-wraps. Targets recipients' kind-10050 inbox relays only. **Returns `Dm` with `relays = null` if no recipient has a kind 10050 (or every DM relay is blocked)** — per NIP-17, clients SHOULD NOT publish if the recipient has not signalled readiness. There is no fallback.
-- `PublishBranch::Draft` — kinds 30024, 30403, 31234. Routes to caller-supplied `privateContentRelays` if any; otherwise falls back to the user's outbox.
-
-```php
+use Innis\Nostr\RelaySelection\Domain\Collection\EventCollection;
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
+use Innis\Nostr\RelaySelection\Domain\Failure\NoDmRelaysFailure;
 use Innis\Nostr\RelaySelection\Domain\Service\PublishRouter;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\PublishContext;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
-use Innis\Nostr\RelaySelection\Domain\Enum\Route\PublishBranch;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\Event;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\RelayDirectory;
 
-$context = new PublishContext(
-    userPubkey: PublicKey::tryFromHex($userHex) ?? throw new InvalidArgumentException('bad pubkey'),
-    relayListEvents: $cachedKind10002And10050Events,
-    privateContentRelays: [],   // caller's pre-extracted kind 10013 URLs (see NIP-37 note below)
-    indexerRelays: [],
-    blockedRelays: $callerBlockedRelays,   // caller's pre-extracted kind 10006 URLs
-);
+$relayLists = new EventCollection(array_filter(array_map(Event::tryFromRaw(...), $rawRelayListArrays)));
+$directory = RelayDirectory::fromEvents($relayLists, RelaySet::fromStrings(['wss://spam.example.com']));
 
-$route = PublishRouter::route($event, $context);
-$strategy = match ($route->getBranch()) {
-    PublishBranch::General => 'NIP-65 outbox fan-out',
-    PublishBranch::Dm      => 'NIP-17 DM inboxes (relays is null if the recipient has no kind 10050)',
-    PublishBranch::Draft   => 'private content relays, falling back to the user outbox',
-};
-foreach ($route->getRelays() ?? [] as $relay) {
-    $pool->publish((string) $relay, $event);
-}
-```
-
-The lib does **not** implement NIP-37 itself — kind 10013's relay list is NIP-44-encrypted inside `content`, and decryption requires a signer + crypto, both out of scope here. Callers that want NIP-37-aware draft routing must fetch and decrypt kind 10013 themselves and pass the resulting URLs into `PublishContext::$privateContentRelays`.
-
-### Route a read
-
-Given a set of filters, decide which relays to subscribe to. Returns a `ReadRoute` with a `ReadBranch` enum and a list of relays.
-
-- `ReadBranch::Search` — any filter with a `search` field. Unions caller-supplied `searchRelays` (from the user's kind 10007 list) with `callerRelays`.
-- `ReadBranch::DmInbox` — every filter is `{kinds: [1059], #p: [singleRecipient]}` and the recipient matches across filters. Targets the recipient's kind-10050 inbox relays.
-- `ReadBranch::General` — everything else. Unions the user's relays with `callerRelays`.
-
-```php
-use Innis\Nostr\RelaySelection\Domain\Entity\Filter;
-use Innis\Nostr\RelaySelection\Domain\Service\ReadRouter;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\ReadContext;
-use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
-
-$context = new ReadContext(
-    userRelayUrls: $userOutboxRelays,
-    callerRelays: $relaysPassedToTheQuery,
-    filters: [new Filter(kinds: [1], pTags: null, search: null)],
-    relayListEvents: $cachedRelayLists,
-    blockedRelays: $callerBlockedRelays,    // pre-extracted kind 10006
-    searchRelays: $callerSearchRelays,      // pre-extracted kind 10007
-);
-
-$route = ReadRouter::route($context);
-$strategy = match ($route->getBranch()) {
-    ReadBranch::Search   => 'subscribe to search-capable relays',
-    ReadBranch::DmInbox  => "subscribe to the recipient's DM inboxes",
-    ReadBranch::General  => 'subscribe to user + caller relays',
-};
-```
-
-### Filter pattern detection
-
-`ReadRouter` internally calls `FilterPatternClassifier::classify($filters)` to map a filter set to a `ReadBranch` (`Search`, `DmInbox`, `General`). The primitive is exposed so callers can inspect or branch on the pattern without invoking the full router.
-
-```php
-use Innis\Nostr\RelaySelection\Domain\Enum\Route\ReadBranch;
-use Innis\Nostr\RelaySelection\Domain\Service\FilterPatternClassifier;
-
-$branch = FilterPatternClassifier::classify($filters);
-// ReadBranch::Search | ReadBranch::DmInbox | ReadBranch::General
-```
-
-### Author read: greedy set cover
-
-Given a list of author pubkeys, decide which outbox relays cover them. Uses greedy set-cover so two authors who share a relay are queried together; chunks each plan if the author count exceeds `maxAuthorsPerFilter`; falls back to caller-supplied relays for authors with no NIP-65 list.
-
-```php
-use Innis\Nostr\RelaySelection\Domain\Service\AuthorReadRouter;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\AuthorReadRouteContext;
-
-$context = new AuthorReadRouteContext(
-    authorPubkeys: $followedPubkeys,
-    relayListEvents: $cachedRelayLists,
-    fallbackRelays: $defaultRelays,
-    maxAuthorsPerFilter: 200,
-    redundancy: 3,
-    blockedRelays: $callerBlockedRelays,
-);
-
-foreach (AuthorReadRouter::route($context) as $route) {
-    foreach ($route->getAuthorChunks() as $chunk) {
-        $pool->subscribe(
-            array_map('strval', $route->getRelays()),
-            ['kinds' => [1], 'authors' => array_map(fn ($pk) => $pk->toHex(), $chunk)],
-        );
+$note = Event::tryFromRaw($rawNoteArray);
+if (null !== $note) {
+    $route = PublishRouter::route($note, $directory);
+    if (!$route instanceof NoDmRelaysFailure) {
+        foreach ($route->getRelays() as $relay) {
+            $pool->publish((string) $relay, $note);
+        }
     }
 }
 ```
 
-### Pick a relay hint
+[`examples/route-relays.php`](examples/route-relays.php) is a self-contained, runnable walk through every operation with three synthetic identities:
 
-For `e` / `p` / `q` tags, pick a single relay URL the recipient is likely to read. Prefers the intersection of the user's outbox with the target's inbox, falls back to either side's first relay, returns `null` if neither side has a list.
+```bash
+php examples/route-relays.php
+```
 
-### URL classification
+## Types and validation
 
-Pure predicates on `RelayUrl` for use in caller-side filtering. The library does not apply these itself — they're exposed so consumers can compose filters without re-implementing host detection.
+Every input type has a parser for untrusted, JSON-shaped data that returns `null` when the input is malformed:
 
 ```php
-$url = RelayUrl::tryFromString('ws://192.168.1.11:7777');
-$url->isOnion();      // false
-$url->isLoopback();   // false (true for localhost, 127.0.0.0/8, ::1)
-$url->isLocalAddr();  // true  (loopback OR RFC1918 OR .local mDNS)
-$url->isInsecure();   // true  (ws:// AND not onion)
+$event  = Event::tryFromRaw($array);          // ?Event: id, kind, pubkey, created_at, tags
+$filter = Filter::tryFromRaw($array);         // ?Filter: kinds, #p, search (other fields ignored)
+$tag    = Tag::tryFromRaw(['p', $hex]);       // ?Tag
+$pubkey = PublicKey::tryFromHex($hex);        // ?PublicKey
+$id     = EventId::tryFromHex($hex);          // ?EventId
+$relay  = RelayUrl::tryFromString($url);      // ?RelayUrl
+$relays = RelaySet::fromStrings($urls);       // RelaySet, malformed entries dropped
 ```
 
-### Caller-owned lists (blocked, search, private content)
+Collections are typed and immutable: `EventCollection`, `FilterCollection`, `PublicKeyCollection`, `TagCollection` and `RelaySet` reject an element of the wrong type with `InvalidArgumentException`. `RelaySet` also deduplicates by canonical URL on construction and offers `union`, `without`, `take`, `contains`, `first` and `toStrings`.
 
-Three kinds of user-owned data are passed as pre-extracted URL lists rather than as raw events:
+`Event` carries the five fields routing reads. The id is used only to break a `created_at` tie between two relay lists: the lowest id wins, as NIP-01 specifies ([ADR-0004](docs/adr/0004-the-event-value-carries-the-five-fields-routing-reads.md)).
 
-| Kind  | NIP   | Field on context                          | Notes                                                              |
-|-------|-------|-------------------------------------------|--------------------------------------------------------------------|
-| 10006 | NIP-65| `blockedRelays`  (on every context)       | Subtracted from every route output uniformly.                      |
-| 10007 | NIP-50| `searchRelays`  (on `ReadContext`)        | Unioned into the `Search` branch alongside caller-supplied relays. |
-| 10013 | NIP-37| `privateContentRelays` (on `PublishContext`)| Encrypted content — caller must decrypt before passing.            |
+## The relay directory
 
-For 10006 and 10007 the caller pre-extracts URLs from their cached event using `RelayListExtractor::blocked($event->getTags())` or `::search($event->getTags())`. For 10013, the caller does NIP-44 decryption themselves and passes the resulting URLs.
+Every routing operation reads relay lists through one `RelayDirectory`, built once from the relay-list events you hold and your blocklist:
 
-This mirrors the existing `userRelayUrls` pattern on `ReadContext`: user-owned data is the caller's responsibility to extract; library policy is to apply.
+```php
+$directory = RelayDirectory::fromEvents($relayListEvents, $blockedRelays);
 
-### Other operations
-
-| Service                                | Purpose                                                                                                  |
-|----------------------------------------|----------------------------------------------------------------------------------------------------------|
-| `AuthorRelaySelector::inbox`     | Pick inbox relays for one author (kind 10002 `read`/`both` markers).                                     |
-| `AuthorRelaySelector::outbox`    | Pick outbox relays for one author (kind 10002 `write`/`both` markers).                                   |
-| `AuthorRelaySelector::dm`        | Pick DM relays for one author (kind 10050 `relay` tags).                                                 |
-| `ZapRequestRelaySelector`        | Merge zapper and recipient inbox relays for a zap request.                                               |
-| `RelayHintSelector`               | Pick one relay URL hint for an `e`/`p`/`q` tag.                                                          |
-| `FilterPatternClassifier::classify`   | Classify a filter set as `Search`, `DmInbox`, or `General`.                                              |
-| `FilterPatternClassifier::sharedGiftWrapRecipient` | If every filter is `{kinds: [1059], #p: [singleRecipient]}` with the same recipient, return that `PublicKey`; otherwise `null`. Useful for detecting DM-target reads without invoking the full router. |
-| `MissingRelayListFinder`       | For inbox-fanout events, list `p`-tagged pubkeys whose relay list you do not yet have cached.            |
-| `EventSelector::newestByPubkeyAndKind` | Find the newest event for a given `(pubkey, kind)` tuple in a heterogeneous event array. Used internally by every routing service and exposed for callers building their own cache layers. Returns `?Event`.|
-| `RelayListExtractor::inbox/outbox/dm`  | Parse `r` and `relay` tags from kind 10002 / 10050 events.                                               |
-| `RelayListExtractor::blocked/search`   | Parse `relay` tags from kind 10006 / 10007 events.                                                       |
-| `RelaySetBuilder::build`               | Merge any number of relay sources into one deduplicated list, preserving first-seen order.               |
-| `RelaySetBuilder::subtract`            | Remove URLs in a blocklist from a relay set.                                                             |
-| `RelayUrl::tryFromString`                 | Normalise an arbitrary URL string. Lowercases scheme and host, strips default ports and trailing slashes. Rejects non-wss(?), fragments, `%20` in paths, malformed hostnames, out-of-range ports, concatenated URLs, and inputs over 200 chars.|
-| `RelayUrl::isOnion/isLoopback/isLocalAddr/isInsecure` | Pure URL classification predicates.                                                       |
-| `RelayUrl::equals`                     | Compare two `RelayUrl` instances for canonical-string equality.                                          |
-| `Event::tryFromRaw` / `Filter::tryFromRaw` / `Tag::tryFromRaw` | Validate and construct typed objects from JSON-shaped arrays. Return `null` on malformed input.   |
-| `PublicKey::tryFromHex` / `PublicKey::toHex` / `PublicKey::equals` | Construct from / serialise to / compare hex pubkeys.                                    |
-
-## Routing rules
-
-The complete policy in one place. Each rule is encoded in the source and locked by a corpus vector.
-
-### What goes in `EventKind`
-
-A kind appears in `EventKind` **if and only if the routing policy distinguishes it from arbitrary unknown kinds.** Concretely, a kind belongs in the enum when at least one of these is true:
-
-- It triggers a branch in `PublishRouter` (a `match` arm or a helper predicate).
-- It triggers a branch in `ReadRouter` or `FilterPatternClassifier`.
-- It is parsed by `RelayListExtractor` (kind 10002 / 10006 / 10007 / 10050).
-- It drives a dedicated service (kinds parsed from the relay-list events array).
-
-The rule is **drives a branch in `PublishRouter::route`**, not "has any routing rule." Two NIPs define routing rules for kinds that are nonetheless absent from `EventKind`, and that's deliberate:
-
-- **`Deletion` (5)** — NIP-09 says deletion events should publish to every relay the original event was on. The lib has no event-publication history and tracking that would require state (out of scope: no I/O, no caches). So kind 5 falls through to General → user's outbox, the best a stateless pure-policy library can offer. Adding a `Deletion` case to `EventKind` would imply a dedicated branch the lib cannot honestly implement.
-
-- **`ZapRequest` (9734)** — NIP-57 routing (zapper-inbox ∪ recipient-inbox) **is** implemented, but as a dedicated service: `ZapRequestRelaySelector::select` over `ZapRequestContext`. The kind doesn't belong in `EventKind` because that enum is specifically what `PublishRouter::route` branches on, and zap requests don't flow through `routePublish` — they're sent to an LNURL HTTP callback per NIP-57 §3, not published through the normal pool. Kind 9734 is in the routing spec; it just enters via a different door.
-
-Pure vocabulary-only constants — `Report` (1984), `LiveActivity` (30311), `Job` (5000-5999), etc. — never enter the routing spec at all. A future kind registry package (or `innis/nostr-core`) is the right home for those names. (`ProfileMetadata` (0) and `FollowList` (3) earned their place by being indexed kinds; the rule remains "drives a routing decision, or out.")
-
-### Publish branches
-
-`PublishRouter::route($event, $context)` dispatches on event kind into one of three branches. Every output also has the user's `blockedRelays` subtracted.
-
-| Branch | Triggering kinds | Output relays |
-|---|---|---|
-| `Dm` | 1059 (`GiftWrap`) | Per recipient (`p` tag), the recipient's newest kind-10050 inbox relays. **Empty** if the recipient has no kind 10050 (per NIP-17 "shouldn't try"). |
-| `Draft` | 30024 (`LongformDraft`), 30403 (`ClassifiedListingDraft`), 31234 (`DraftEvent`) | `privateContentRelays` if non-empty, otherwise user's outbox (from newest kind 10002, `write`/`both` markers). |
-| `General` | Everything else | User's outbox, plus — for `isInboxFanout` kinds — recipient inbox fanout (capped per recipient), plus — for `isIndexed` kinds — `indexerRelays`. |
-
-`isInboxFanout` includes: 1 (`ShortNote`), 6 (`Repost`), 7 (`Reaction`), 16 (`GenericRepost`), 24 (`PublicMessage`), 1111 (`Comment`), 9802 (`Highlight`). For these kinds, every `p`-tagged recipient's newest kind-10002 inbox (`read`/`both` markers; unmarked entries count as `both`) is unioned in. If the recipient has no usable inbox — either because kind 10002 is absent OR because the cached kind 10002 has no `read`/`both` entries (write-only) — the lib falls back to the position-`[2]` relay hint on the `p` tag, if any. Per-recipient cap defaults to 3 (`PublishContext::DEFAULT_PER_RECIPIENT_CAP`).
-
-`isIndexed` includes: 0 (`ProfileMetadata`), 3 (`FollowList`), 10002 (`RelayList`), 10050 (`DmRelayList`). When publishing one of these, `indexerRelays` are unioned into the General output so well-known indexers (`purplepag.es`, `user.kindpag.es`, `relay.nos.social`, etc.) see the updated event. The set matches welshman's `INDEXED_KINDS`.
-
-### Read branches
-
-`ReadRouter::route($context)` dispatches on filter shape. Pattern detection is also exposed as a primitive via `FilterPatternClassifier::classify($filters)`, which returns `ReadBranch` directly. Every output has `blockedRelays` subtracted.
-
-| Branch | Triggering filter shape | Output relays |
-|---|---|---|
-| `Search` | Any filter has a non-null `search` field | `searchRelays` ∪ `callerRelays`. |
-| `DmInbox` | **Every** filter is exactly `{kinds: [1059], #p: [singleRecipient]}` and the recipient is the same across filters | Recipient's newest kind-10050 inbox relays, or `null` if none are available (see below). |
-| `General` | Anything else (including no filters) | `userRelayUrls` ∪ `callerRelays`. |
-
-### DM branches return null with no fallback
-
-The DM branches — `ReadBranch::DmInbox` and `PublishBranch::Dm` — are the only branches whose `relays` can be `null`. Both return null when the recipient has no cached kind-10050 event, when the kind-10050 event extracts to no relays, or when blocking removes every DM relay the recipient declared. There is **no fallback** to `callerRelays`, `userRelayUrls`, or any other source — a gift-wrap publish or subscription cannot quietly redirect to relays the recipient has not authorised without leaking metadata about who the caller is talking to. A null result means "the caller cannot honour this DM; do not act."
-
-The other branches never return null; they may return an empty array if their inputs are all empty (e.g. user has no outbox and the caller supplied no relays), which signals caller misconfiguration rather than a routing refusal:
-
-| `relays` value | Meaning |
-|---|---|
-| `null` | Branch is `Dm` / `DmInbox` and no DM-relay route exists. By design. Do not act. |
-| `[]` | Branch is non-DM and the inputs produced nothing. Caller misconfiguration. |
-| non-empty | Use these relays. |
-
-### Unknown kinds
-
-Any kind not specifically named in the policy routes as `PublishBranch::General` with no recipient fanout and no indexer relays — i.e. to the user's outbox only. This is deliberate: the spec-derived default for an unrecognised kind is "publish to the author's own outbox, nothing more."
-
-Two paths to change that:
-
-- **Adapter layer (preferred for app-specific behaviour).** If your client has its own routing intuition for a new or experimental kind, handle it in the adapter that wraps this library. Inspect `$event->getKind()`, branch as you wish, and feed your selected relays directly into your pool. The library returns its General-branch answer; your adapter overlays your policy on top. This keeps the spec library small and stable.
-- **Library (only when the rule belongs in the spec).** If a NIP defines routing for a new kind and the lib should encode that NIP-derived rule for everyone, add a case to `EventKind` and an arm to the relevant helper or branch. This adds a corpus vector and a binding decision across every port. Reserve it for behaviour that's a property of the protocol, not of your app.
-
-### Blocklist application
-
-`blockedRelays` is subtracted from every routing output uniformly. The list is the caller's responsibility to pre-extract from kind 10006 events (use `RelayListExtractor::blocked($event->getTags())`). The library never connects to relays, so "blocked" here means "filtered out of routing outputs"; the engine layer above the library should also refuse to open connections to these URLs.
-
-### Search relays
-
-`searchRelays` is the caller's pre-extracted list from their kind 10007 event. It is unioned (alongside `callerRelays`) into the `Search` branch only. It is not consulted for `General` or `DmInbox` reads.
-
-## Architecture
-
-```
-src/Domain/
-  Entity/
-    Event.php                    Minimal event carrier (kind, pubkey, created_at, tags)
-    Filter.php                   Minimal filter carrier (kinds, #p, search)
-  Enum/
-    EventKind.php                Backed enum of well-known kinds + static isInboxFanout / isDraft / isIndexed
-    Route/
-      PublishBranch.php          (General | Dm | Draft)
-      ReadBranch.php             (Search | DmInbox | General)
-  Service/                       Pure stateless services
-    RelayListExtractor.php
-    RelaySetBuilder.php
-    EventSelector.php
-    PublishRouter.php
-    ReadRouter.php
-    AuthorReadRouter.php
-    AuthorRelaySelector.php
-    ZapRequestRelaySelector.php
-    RelayHintSelector.php
-    FilterPatternClassifier.php
-    MissingRelayListFinder.php
-  ValueObject/
-    Identity/PublicKey.php
-    Protocol/RelayUrl.php                    (with isOnion/isLoopback/isLocalAddr/isInsecure)
-    Tag.php                                  Single-tag wrapper (value-indexed string access + fromRaw factory)
-    Context/                                 Typed inputs (PublishContext, ReadContext, etc.)
-    Route/                                   Typed outputs (PublishRoute, ReadRoute, AuthorReadRoute, enums)
+$directory->relaysOf($pubkey, RelayRole::Outbox);  // RelaySet
+$directory->permitted($callerRelays, $extraRelays); // union of the sets, minus blocked relays
+$directory->getBlocked();                           // the blocklist
 ```
 
-There is no Application layer because no infrastructure ports are needed. There is no Infrastructure layer because there are no adapters. Routing is pure protocol logic.
+- For each (pubkey, kind) the directory keeps the newest event: the greatest `created_at`, then the lowest id. The result does not depend on the order of the events.
+- A `RelayRole` names what a list is for and owns the kind it is read from:
 
-### Relationship to `innis/nostr-core`
+  | Role | Kind | Tags read |
+  | --- | --- | --- |
+  | `RelayRole::Inbox` | 10002 (NIP-65) | `r` tags not marked `write` (unmarked, `read`, `both` or any other marker), a relay named twice being the union ([ADR-0016](docs/adr/0016-a-relays-nip65-marker-is-read-across-every-r-tag-naming-it-and-an-undefined-marker-is-both.md)) |
+  | `RelayRole::Outbox` | 10002 (NIP-65) | `r` tags not marked `read` (unmarked, `write`, `both` or any other marker), a relay named twice being the union |
+  | `RelayRole::Dm` | 10050 (NIP-17) | `relay` tags |
+  | `RelayRole::Search` | 10007 (NIP-51) | `relay` tags |
+  | `RelayRole::Blocked` | 10006 (NIP-51) | `relay` tags |
 
-`innis/nostr-relay-selection` deliberately **does not depend** on `innis/nostr-core`. The two libraries are independent and can be used together or separately.
+- Every relay set the directory returns is deduplicated and has the blocklist removed, so no routing operation ever chooses a blocked relay.
 
-`PublicKey`, `RelayUrl`, `Event`, `Filter` and `Tag` are re-declared here in minimal form, because re-declaring five small types is preferable to forcing every consumer of relay selection to adopt nostr-core — and a particular version of it. The reasoning, and what the duplication costs, is recorded in [ADR-0002](docs/adr/0002-the-library-re-declares-the-protocol-types-it-needs.md). If you are already using nostr-core, convert at the boundary (`PublicKey::tryFromHex($core->toHex())`).
+The blocklist is passed in rather than read from a kind 10006 event because NIP-51 lets entries live in encrypted content, which this library cannot decrypt. Read the public entries with `RelayRole::Blocked->extract($event->getTags())`, add any you decrypted, and pass the result.
 
-## What this library does NOT do
+## Route a publish
 
-Deliberate omissions. These belong in the engine layer wrapping the lib, not in the lib itself.
+`PublishRouter::route($event, $directory, $policy)` returns a `PublishRoute` (`getBranch()`, `getRelays()`) or, for a gift wrap with nowhere to go, `NoDmRelaysFailure::NoDmRelays`. The branches are tried in this order:
 
-- **No empirical scoring.** No `received_events` counters, no time-decay, no popularity sort. The lib treats all spec-derived relays as equally valid; ordering follows the NIP rules and input order only.
-- **No fetch tracking / no learning.** The lib does not know what relays you've connected to, succeeded with, or failed against. State is the caller's responsibility.
-- **No caching.** Every call re-reads the events you pass in. Cache them yourself if you need to.
-- **No randomness, no tie-breaks.** Two calls with the same inputs return the same outputs in the same order. Always.
-- **No hardcoded fallback URLs.** If your routing returns empty, the caller decides what to do. The lib will never silently inject `wss://relay.damus.io` or any other default.
-- **No pool-state awareness.** Whether a relay is currently connected is invisible to the lib.
-- **No transport, no crypto, no I/O.** The lib has no `connect()`, no `publish()`, no `sign()`, no `decrypt()`. Pure data in, pure data out.
+| Branch | When | Relays |
+| --- | --- | --- |
+| `PublishBranch::Dm` | kind 1059 or 21059 (NIP-59 gift wrap, stored or ephemeral) | Every `p`-tagged recipient's kind 10050 relays. None left: `NoDmRelaysFailure` (NIP-17: do not publish; there is no fallback). |
+| `PublishBranch::Draft` | kinds 30024, 30403, 31234 | `privateContentRelays`, or the author's outbox when none remains after blocking. |
+| `PublishBranch::Group` | an `h` tag with a group id (NIP-29) | The `h` tag's relay hint and `groupRelays`; no outbox or inbox fan-out. When none remains after blocking, the event falls through to `General`. |
+| `PublishBranch::General` | everything else | The author's outbox; plus every inbox relay of each `p`-tagged recipient (NIP-65), or, as a best-effort fallback, the `p` tag's relay hint when the recipient has no inbox; plus `indexerRelays` for indexed kinds (0, 3, 10002, 10050). `perRecipientCap` limits the inbox relays per recipient; by default (`PerRecipientCap::all()`) there is no limit. A kind whose `p` tags are data, not mentions, has no recipients and goes to the author's outbox (and indexers) only: kind 3 (NIP-02 follow list), 1984 (NIP-56 report) and the NIP-51 lists and sets of people, 10000, 10017, 10020, 10054, 10064, 10101, 30000, 30007, 39089 and 39092 (`EventKind::isPubkeyData`). Every other kind fans out ([ADR-0018](docs/adr/0018-a-public-event-is-also-sent-to-every-inbox-relay-of-each-user-it-tags.md)). |
+
+The outbox is always the event author's. Blocked relays are removed before any choice: a recipient's inbox is deduplicated and cleared of blocked relays before the cap is taken, a blocked hint is ignored, and a draft or group whose relays are all blocked falls back as above ([ADR-0010](docs/adr/0010-blocked-relays-are-removed-before-any-choice-is-made.md)). DM and draft branches come before the group branch, so private content never reaches a group relay ([ADR-0011](docs/adr/0011-private-branches-take-precedence-over-group-routing.md)), and no DM, draft or group message fans out to a tagged user's inbox.
+
+NIP-65 also asks that the author's kind 10002 be sent to every relay the event was published to. That is your job: publish the author's relay list event to the same route.
+
+```php
+$route = PublishRouter::route($event, $directory, new PublishPolicy(
+    privateContentRelays: $decryptedKind10013Relays,
+    indexerRelays: RelaySet::fromStrings(['wss://purplepag.es']),
+    groupRelays: $relaysHostingThisGroup,
+    perRecipientCap: new PerRecipientCap(3), // optional; default PerRecipientCap::all()
+));
+$strategy = $route instanceof NoDmRelaysFailure ? 'do not publish' : match ($route->getBranch()) {
+    PublishBranch::General => 'NIP-65 outbox and inbox fan-out',
+    PublishBranch::Dm => 'NIP-17 DM relays',
+    PublishBranch::Draft => 'private content relays',
+    PublishBranch::Group => 'NIP-29 group relays',
+};
+```
+
+A non-DM route may carry an empty `RelaySet` when your inputs name no relay (the author has no outbox and you supplied nothing); what to fall back to is your decision.
+
+## Route a read
+
+`ReadRouter::route($filters, $directory, new ReadPolicy($userPubkey, $callerRelays))` returns a `ReadRoute` or `NoDmRelaysFailure`:
+
+| Branch | When | Relays |
+| --- | --- | --- |
+| `ReadBranch::Search` | any filter has a non-empty `search` | The user's kind 10007 search relays, then the caller relays. |
+| `ReadBranch::DmInbox` | every filter asks only for kinds 1059 and/or 21059 with exactly one `#p`, the same recipient in each | The recipient's kind 10050 relays. None left: `NoDmRelaysFailure`. |
+| `ReadBranch::General` | anything else, including no filters | The inbox relays of every user a `#p` names (NIP-65: events about a user are read from that user's read relays), then the user's inbox and outbox, then the caller relays. The user's own relays are read only when no filter has a `#p`, a filter has none, or a tagged user has no inbox left after blocking ([ADR-0019](docs/adr/0019-a-read-about-tagged-users-goes-to-their-inbox-relays.md)). |
+
+`FilterPatternClassifier::classify($filters)` exposes the classification on its own as a `FilterPattern`, with the recipient available from `getDmRecipient()`.
+
+## Read many authors
+
+`AuthorReadRouter::route($authors, $directory, $policy)` plans which outbox relays to read a set of authors from. Greedy set cover groups authors who share a relay; each author is read from up to the redundancy target; each route's authors are chunked. Authors with no usable outbox (no kind 10002, no write entries, or all blocked) are read from the fallback relays in a final route, which is omitted when no fallback relay remains. No route ever has an empty relay set.
+
+```php
+$routes = AuthorReadRouter::route($followed, $directory, new AuthorReadPolicy(
+    fallbackRelays: $defaultRelays,
+    maxAuthorsPerFilter: new PositiveCount(200),
+    redundancy: new Redundancy(3),      // or Redundancy::all()
+));
+foreach ($routes as $route) {
+    foreach ($route->getAuthorChunks() as $chunk) {
+        $pool->subscribe($route->getRelays()->toStrings(), ['kinds' => [1], 'authors' => array_map(fn ($pk) => $pk->toHex(), $chunk->toArray())]);
+    }
+}
+```
+
+`PositiveCount`, `PerRecipientCap` and `Redundancy` throw `InvalidArgumentException` for a count below one ([ADR-0013](docs/adr/0013-invalid-routing-counts-are-programmer-errors.md)).
+
+## Other operations
+
+| Operation | Purpose |
+| --- | --- |
+| `RelayHintSelector::select($userPubkey, $target, $directory)` | One relay hint for a tag, else `null`: a relay where the target's events are found ([ADR-0020](docs/adr/0020-a-relay-hint-names-where-its-target-is-found-and-prefers-the-relay-it-was-seen-on.md)). `$target` is `new RelayHintTarget($pubkey, $seenOn = null)`: `$pubkey` is the referenced event's author for an `e` / `q` / `a` tag and the tagged user for a `p` tag; `$seenOn` is a relay you received the target from (the event, or an event by the tagged user). The hint is `$seenOn` unless blocked, else the target's first outbox relay, else the user's first inbox relay. |
+| `ZapRequestRelaySelector::select($zapperPubkey, $recipientPubkey, $directory)` | NIP-57: the zapper's inbox relays, then the recipient's. |
+| `RecipientsWithoutInboxFinder::find($event, $directory)` | The `p`-tagged recipients publish routing cannot reach through an inbox (no kind 10002, no read entries, or all blocked), for which `PublishBranch::General` falls back to the `p`-tag hint. Useful for fetching missing relay lists before publishing. Empty for gift wrap and draft kinds and for kinds whose `p` tags are data, which never fan out. |
+| `RecipientExtractor::fromEvent($event)` | The event's `p`-tagged recipients with their relay hints, first occurrence of each pubkey; none for a kind whose `p` tags are data. |
+| `RelayRole::extract($tags)` / `RelayRole::kind()` | Read one role's relays from a relay-list event's tags; the kind a role is read from. |
+| `RelayUrl::isOnion` / `isLoopback` / `isLocalAddr` / `isInsecure` | URL predicates for your own filtering; routing never applies them. Address ranges match IPv4 dotted quads only, so `wss://10.example.com` is not local; no relay URL holds an IPv6 literal ([ADR-0017](docs/adr/0017-the-url-classifiers-read-only-names-and-ipv4-addresses-because-no-relay-url-holds-an-ipv6-literal.md)). |
+| `EventKind::isGiftWrap` / `isDraft` / `isIndexed` / `isPubkeyData` | The kind groupings routing branches on. `EventKind` names only the kinds routing distinguishes ([ADR-0014](docs/adr/0014-a-kind-is-named-only-when-routing-branches-on-it.md)). |
+
+## Caller-owned lists
+
+Three lists can be partly or wholly encrypted, so you pass their relays in rather than the library reading events:
+
+| Kind | NIP | Where it goes |
+| --- | --- | --- |
+| 10006 blocked relays | NIP-51 | `RelayDirectory::fromEvents($events, $blocked)`; removed from everything. |
+| 10007 search relays | NIP-51 | Public entries are read from the directory for the search branch; add decrypted entries to the read policy's caller relays. |
+| 10013 private content relays | NIP-37 | The `privateContentRelays` argument of `PublishPolicy`, for drafts. |
+
+## Upgrading from 0.2
+
+0.3 replaces the context objects with the directory and small policy objects:
+
+- Build `RelayDirectory::fromEvents($events, $blocked)` once and pass it to every call. `PublishRouter::route($event, $context)` becomes `route($event, $directory, $policy)`; `ReadRouter::route($context)` becomes `route($filters, $directory, $policy)`; `AuthorReadRouter::route($context)` becomes `route($authors, $directory, $policy)`; `RelayHintSelector::select($context)` becomes `select($userPubkey, $target, $directory)` (see below) and `ZapRequestRelaySelector` takes pubkeys then the directory; `MissingRelayListFinder` becomes `RecipientsWithoutInboxFinder`.
+- `AuthorRelaySelector`, `EventSelector`, `RelayListExtractor` and `RelaySetBuilder` are gone: use `$directory->relaysOf()`, `RelayRole::extract()` and `RelaySet`.
+- Routes never have `null` relays. A refused DM is `NoDmRelaysFailure::NoDmRelays`; test with `$route instanceof NoDmRelaysFailure`. `AuthorReadRouter` returns an `AuthorReadRouteCollection`.
+- `Event`, `Filter` and `Tag` moved to `Domain\ValueObject\Protocol`; `Event` requires an id; lists are typed collections; `PublicKey` has no `__toString` (use `toHex()`); `Filter::getSearch()` is gone; `EventKind` predicates are enum methods.
+- Counts are `PositiveCount` / `PerRecipientCap` / `Redundancy` value objects; `null` redundancy becomes `Redundancy::all()`.
+- The publish outbox is the event author's (`$event->getPubkey()`), not a caller-supplied user key: `PublishContext::$userPubkey` is gone ([ADR-0018](docs/adr/0018-a-public-event-is-also-sent-to-every-inbox-relay-of-each-user-it-tags.md)). The read branch derives the user's relays from the directory.
+- Publish routing gains NIP-29 group routing: an `h`-tagged event whose group relays (the tag's relay hint and `PublishPolicy`'s group relays) are not all blocked routes as `PublishBranch::Group` to those relays only, after the DM and draft branches, so an `h`-tagged gift wrap or draft is never sent to a group relay ([ADR-0011](docs/adr/0011-private-branches-take-precedence-over-group-routing.md)). A `match` over `PublishBranch` needs the new case.
+- Kinds take nostr-core's names: `EventKind::ProfileMetadata` becomes `Metadata`, `BlockedRelayList` `BlockedRelaysList`, `SearchRelayList` `SearchRelaysList` and `LongformDraft` `LongformContentDraft` ([ADR-0014](docs/adr/0014-a-kind-is-named-only-when-routing-branches-on-it.md)).
+- An `r` tag with a marker other than `read` or `write` now counts as both instead of being dropped, and a relay named by several `r` tags is the union of them ([ADR-0016](docs/adr/0016-a-relays-nip65-marker-is-read-across-every-r-tag-naming-it-and-an-undefined-marker-is-both.md)).
+- Kind 21059 (the NIP-59 ephemeral gift wrap) is routed like kind 1059: published to the recipients' kind 10050 relays or refused, and a read asking only for gift-wrap kinds with one `#p` is a `ReadBranch::DmInbox` read. `FilterPatternClassifier::classify` returns a `FilterPattern` instead of a `ReadBranch`, and `sharedGiftWrapRecipient` is gone (use `getDmRecipient()`).
+- Blocked relays are removed before any choice is made, so a blocklist can change the branch, not only the relays: a recipient's inbox is deduplicated and cleared of blocked relays before the cap, a recipient whose inbox is all blocked falls back to the `p`-tag hint, and a draft or group whose relays are all blocked falls back ([ADR-0010](docs/adr/0010-blocked-relays-are-removed-before-any-choice-is-made.md)). `AuthorReadRouter` omits the fallback route when no fallback relay remains instead of returning one with no relays ([ADR-0012](docs/adr/0012-only-a-dm-route-can-be-refused-and-a-refusal-is-a-value.md)).
+- `RecipientsWithoutInboxFinder` reports every recipient publish routing cannot reach through an inbox (no kind 10002, a list with no read entries, or every inbox relay blocked), where `MissingRelayListFinder` reported only those with no kind 10002.
+- `RelayUrl::isLoopback` and `isLocalAddr` match address ranges on dotted-quad IPv4 hosts only: a hostname such as `127.example.com` or `10.example.com` is no longer loopback or local.
+- `Event::tryFromRaw`, `Filter::tryFromRaw` and `Tag::tryFromRaw` refuse an array where the protocol has the other JSON type: a filter given as a non-empty list, `kinds`, `#p`, `tags` or a tag given as a keyed array.
+- Publish fan-out follows NIP-65: on `PublishBranch::General` an event of any kind that mentions users goes to every inbox relay of each `p`-tagged recipient. The kinds whose `p` tags are data, not mentions, still go to the author's outbox only, as they did in 0.2 where `EventKind::isInboxFanout` did not list them: kind 3, kind 1984 and the NIP-51 lists and sets of people (10000, 10017, 10020, 10054, 10064, 10101, 30000, 30007, 39089, 39092). `EventKind::isPubkeyData` names them, with the new cases `Reporting`, `MuteList`, `GitAuthorsList`, `MediaFollowsList`, `FavouritePodcastsList`, `AuthoredPodcastsList`, `GoodWikiAuthorsList`, `FollowSet`, `KindMuteSet`, `StarterPack` and `MediaStarterPack`; a `match` over `EventKind` needs them. The per-recipient cap is `PublishPolicy`'s `PerRecipientCap`, defaulting to `PerRecipientCap::all()` where `PublishContext` defaulted to 3 (pass `new PerRecipientCap(3)` to keep a cap), and `PublishContext::DEFAULT_PER_RECIPIENT_CAP` is gone. `EventKind::isInboxFanout` and the cases it alone needed (`ShortNote`, `Repost`, `Reaction`, `GenericRepost`, `PublicMessage`, `Comment`, `Highlight`) are removed; take kinds from `innis/nostr-core`. `RecipientsWithoutInboxFinder` now reports recipients for every kind except gift wraps, drafts and the kinds whose `p` tags are data ([ADR-0018](docs/adr/0018-a-public-event-is-also-sent-to-every-inbox-relay-of-each-user-it-tags.md)).
+- A `ReadBranch::General` read whose filters name users in `#p` reads those users' inbox relays, and the user's own relays only when a filter has no `#p` or a tagged user has no inbox ([ADR-0019](docs/adr/0019-a-read-about-tagged-users-goes-to-their-inbox-relays.md)).
+- Sending the author's kind 10002 to the relays an event went to (NIP-65) is the caller's job.
+- `RelayUrl::isLoopback` no longer names `::1`: no relay URL can hold an IPv6 literal, so it never matched ([ADR-0017](docs/adr/0017-the-url-classifiers-read-only-names-and-ipv4-addresses-because-no-relay-url-holds-an-ipv6-literal.md)).
+- `RelayHintSelector::select`'s `$target` is `new RelayHintTarget($pubkey, $seenOn = null)`, and every hint names a relay where its target's events are found: `$seenOn` (a relay you received the event, or an event by the tagged user, from), then the target's outbox, then the user's inbox, where 0.2 took the user's outbox relay in the target's inbox, then the target's inbox, then the user's outbox. `$pubkey` is the referenced event's author for an `e` / `q` / `a` tag and the tagged user for a `p` tag ([ADR-0020](docs/adr/0020-a-relay-hint-names-where-its-target-is-found-and-prefers-the-relay-it-was-seen-on.md)).
 
 ## Testing
 
 ```bash
-composer test          # Unit + Compliance + PHPStan (ship gate)
+composer test          # PHPUnit (Unit, Compliance, Acceptance) and PHPStan level 9
 composer test-unit     # Unit suite only
 composer analyse       # PHPStan level 9
+composer check-style   # php-cs-fixer, dry run
+composer check-rector  # Rector, dry run
 composer fix-style     # php-cs-fixer
-composer check-style   # php-cs-fixer, dry run (CI gate)
-composer check-rector  # Rector 8.4 modernisation, dry run (CI gate)
 ```
 
-The compliance suite loads JSON test vectors under `tests/corpus/`. The corpus is the spec — any divergence between implementations is a test failure.
-
-The corpus includes signed events imported verbatim from [`rust-nostr/nostr`](https://github.com/rust-nostr/nostr)'s gossip test suite under `tests/corpus/external-fixtures/rust-nostr/`. Each fixture carries a `source` field naming the upstream test it came from. The imported events are unmodified; our policy outputs are independently derived from the NIPs and may differ from rust-nostr's. Sharing fixture inputs across implementations makes any such divergence inspectable.
-
-## Anti-patterns
-
-- **Calling routing services directly from many places in your app.** Wrap them in a single adapter so policy lives in one place. If app-specific behaviour (defaults, fallbacks, pool state, home-relay ordering) leaks into the routing call sites, you'll end up with N divergent policy stacks instead of one.
-- **Adding app-specific logic to this lib.** If your change needs to know about pool state, default relays, or the home relay, it belongs in the adapter, not here. The lib must remain pure and portable.
-- **Adding a routing service without a corresponding test vector.** The corpus is the spec. Add a vector to `tests/corpus/*.json` and the harness picks it up automatically.
-- **Putting a new kind into a relay set at the call site.** Add a case to `EventKind` and extend the appropriate `isInboxFanout` / `isDraft` / `isIndexed` predicate here, so every caller's routing changes consistently.
+The corpus under [`tests/corpus/`](tests/corpus/) is the specification. It is a byte-identical copy of the TypeScript repository's corpus, and a pinned digest fails the build if the two drift ([ADR-0007](docs/adr/0007-the-corpus-is-the-specification-and-its-digest-is-pinned.md)). Its README describes every vector format.
 
 ## Architecture decisions
 
-Design rationale — the deliberate choices that read like smells until you know why, including why this library re-declares the protocol types rather than depending on `innis/nostr-core` — lives in version-controlled records under [`docs/adr/`](docs/adr/).
+Design rationale, including the choices that read like smells until you know why (why the protocol types are re-declared instead of depending on `innis/nostr-core`, why the routing operations are static), lives in [`docs/adr/`](docs/adr/). Read it before changing the code.
 
 ## License
 

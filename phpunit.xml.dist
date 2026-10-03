@@ -25,6 +25,9 @@
         <testsuite name="Compliance">
             <directory>tests/Compliance</directory>
         </testsuite>
+        <testsuite name="Acceptance">
+            <directory>tests/Acceptance</directory>
+        </testsuite>
     </testsuites>
     <source ignoreSuppressionOfDeprecations="true"
             ignoreIndirectDeprecations="true"

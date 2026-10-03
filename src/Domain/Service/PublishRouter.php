@@ -4,172 +4,91 @@ declare(strict_types=1);
 
 namespace Innis\Nostr\RelaySelection\Domain\Service;
 
-use Innis\Nostr\RelaySelection\Domain\Entity\Event;
+use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
 use Innis\Nostr\RelaySelection\Domain\Enum\EventKind;
+use Innis\Nostr\RelaySelection\Domain\Enum\RelayRole;
 use Innis\Nostr\RelaySelection\Domain\Enum\Route\PublishBranch;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Context\PublishContext;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Identity\PublicKey;
-use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\RelayUrl;
+use Innis\Nostr\RelaySelection\Domain\Failure\NoDmRelaysFailure;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Policy\PublishPolicy;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\Event;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Protocol\Tag;
 use Innis\Nostr\RelaySelection\Domain\ValueObject\Route\PublishRoute;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\Recipient;
+use Innis\Nostr\RelaySelection\Domain\ValueObject\Routing\RelayDirectory;
 
 final class PublishRouter
 {
-    public static function route(Event $event, PublishContext $context): PublishRoute
+    public static function route(Event $event, RelayDirectory $directory, PublishPolicy $policy = new PublishPolicy()): PublishRoute|NoDmRelaysFailure
     {
-        $branch = match (true) {
-            EventKind::GiftWrap->value === $event->getKind() => PublishBranch::Dm,
-            EventKind::isDraft($event->getKind()) => PublishBranch::Draft,
-            default => PublishBranch::General,
-        };
-        if (PublishBranch::Dm === $branch) {
-            $relays = self::dmRelays($event, $context);
-            if (null === $relays) {
-                return new PublishRoute($branch, null);
-            }
-            $afterBlock = RelaySetBuilder::subtract($relays, $context->getBlockedRelays());
-
-            return new PublishRoute($branch, [] === $afterBlock ? null : $afterBlock);
+        $kind = EventKind::tryFrom($event->getKind());
+        if ($kind?->isGiftWrap() ?? false) {
+            return self::dmRoute($event, $directory);
+        }
+        if ($kind?->isDraft() ?? false) {
+            return new PublishRoute(PublishBranch::Draft, self::draftRelays($event, $directory, $policy));
+        }
+        $groupRelays = self::groupRelays($event, $directory, $policy);
+        if (!$groupRelays->isEmpty()) {
+            return new PublishRoute(PublishBranch::Group, $groupRelays);
         }
 
-        $relays = match ($branch) {
-            PublishBranch::Draft => self::draftRelays($context),
-            PublishBranch::General => self::generalRelays($event, $context),
-        };
-
-        return new PublishRoute($branch, RelaySetBuilder::subtract($relays, $context->getBlockedRelays()));
+        return new PublishRoute(PublishBranch::General, self::generalRelays($event, $directory, $policy));
     }
 
-    /**
-     * @return list<RelayUrl>
-     */
-    private static function generalRelays(Event $event, PublishContext $context): array
+    private static function dmRoute(Event $event, RelayDirectory $directory): PublishRoute|NoDmRelaysFailure
     {
-        $inbox = EventKind::isInboxFanout($event->getKind())
-            ? self::recipientInboxFanout($event, $context->getRelayListEvents(), $context->getPerRecipientCap())
-            : [];
+        $relays = new RelaySet()->union(...array_map(
+            static fn (Recipient $recipient): RelaySet => $directory->relaysOf($recipient->getPubkey(), RelayRole::Dm),
+            RecipientExtractor::fromEvent($event)->toArray(),
+        ));
 
-        $indexers = EventKind::isIndexed($event->getKind()) ? $context->getIndexerRelays() : [];
-
-        return RelaySetBuilder::build(self::userOutbox($context), $inbox, $indexers);
+        return $relays->isEmpty() ? NoDmRelaysFailure::NoDmRelays : new PublishRoute(PublishBranch::Dm, $relays);
     }
 
-    /**
-     * @return ?list<RelayUrl>
-     */
-    private static function dmRelays(Event $event, PublishContext $context): ?array
+    private static function draftRelays(Event $event, RelayDirectory $directory, PublishPolicy $policy): RelaySet
     {
-        $dmRelays = [];
-        foreach (self::uniqueRecipientsInOrder($event) as $recipient) {
-            $dmList = EventSelector::newestByPubkeyAndKind(
-                $context->getRelayListEvents(),
-                $recipient['pubkey'],
-                EventKind::DmRelayList->value,
-            );
-            if (null === $dmList) {
-                continue;
-            }
-            foreach (RelayListExtractor::dm($dmList->getTags()) as $url) {
-                $dmRelays[] = $url;
-            }
-        }
-        $relays = RelaySetBuilder::build($dmRelays);
+        $privateRelays = $directory->permitted($policy->getPrivateContentRelays());
 
-        return [] === $relays ? null : $relays;
+        return $privateRelays->isEmpty() ? $directory->relaysOf($event->getPubkey(), RelayRole::Outbox) : $privateRelays;
     }
 
-    /**
-     * @return list<RelayUrl>
-     */
-    private static function draftRelays(PublishContext $context): array
+    private static function groupRelays(Event $event, RelayDirectory $directory, PublishPolicy $policy): RelaySet
     {
-        if ([] !== $context->getPrivateContentRelays()) {
-            return RelaySetBuilder::build($context->getPrivateContentRelays());
-        }
-
-        return RelaySetBuilder::build(self::userOutbox($context));
-    }
-
-    /**
-     * @return list<RelayUrl>
-     */
-    private static function userOutbox(PublishContext $context): array
-    {
-        $list = EventSelector::newestByPubkeyAndKind(
-            $context->getRelayListEvents(),
-            $context->getUserPubkey(),
-            EventKind::RelayList->value,
+        $groupTag = array_find(
+            $event->getTags()->toArray(),
+            static fn (Tag $tag): bool => 'h' === $tag->getValue(0) && '' !== ($tag->getValue(1) ?? ''),
         );
-
-        return null !== $list ? RelayListExtractor::outbox($list->getTags()) : [];
-    }
-
-    /**
-     * @param list<Event> $relayListEvents
-     *
-     * @return list<RelayUrl>
-     */
-    private static function recipientInboxFanout(Event $event, array $relayListEvents, int $cap): array
-    {
-        $out = [];
-        foreach (self::uniqueRecipientsInOrder($event) as $recipient) {
-            foreach (self::recipientInboxRelays($recipient, $relayListEvents, $cap) as $url) {
-                $out[] = $url;
-            }
+        if (null === $groupTag) {
+            return new RelaySet();
         }
 
-        return $out;
+        return $directory->permitted(RelaySet::fromStrings([$groupTag->getValue(2)]), $policy->getGroupRelays());
     }
 
-    /**
-     * @param array{pubkey: PublicKey, hint: ?RelayUrl} $recipient
-     * @param list<Event>                               $relayListEvents
-     *
-     * @return list<RelayUrl>
-     */
-    private static function recipientInboxRelays(array $recipient, array $relayListEvents, int $cap): array
+    private static function generalRelays(Event $event, RelayDirectory $directory, PublishPolicy $policy): RelaySet
     {
-        $relayList = EventSelector::newestByPubkeyAndKind(
-            $relayListEvents,
-            $recipient['pubkey'],
-            EventKind::RelayList->value,
+        $kind = EventKind::tryFrom($event->getKind());
+        $fanout = array_map(
+            static fn (Recipient $recipient): RelaySet => self::inboxOrHint($recipient, $directory, $policy),
+            RecipientExtractor::fromEvent($event)->toArray(),
         );
-        if (null !== $relayList) {
-            $inbox = RelayListExtractor::inbox($relayList->getTags());
-            if ([] !== $inbox) {
-                return array_slice($inbox, 0, $cap);
-            }
-        }
+        $indexers = ($kind?->isIndexed() ?? false) ? $directory->permitted($policy->getIndexerRelays()) : new RelaySet();
 
-        $hint = $recipient['hint'];
-
-        return null !== $hint ? [$hint] : [];
+        return $directory->relaysOf($event->getPubkey(), RelayRole::Outbox)->union(...$fanout)->union($indexers);
     }
 
-    /**
-     * @return list<array{pubkey: PublicKey, hint: ?RelayUrl}>
-     */
-    private static function uniqueRecipientsInOrder(Event $event): array
+    private static function inboxOrHint(Recipient $recipient, RelayDirectory $directory, PublishPolicy $policy): RelaySet
     {
-        $result = [];
-        $seen = [];
-        foreach ($event->getTags() as $tag) {
-            if ('p' !== $tag->getValue(0)) {
-                continue;
-            }
-            $hex = $tag->getValue(1);
-            if (null === $hex || isset($seen[$hex])) {
-                continue;
-            }
-            $pubkey = PublicKey::tryFromHex($hex);
-            if (null === $pubkey) {
-                continue;
-            }
-            $seen[$hex] = true;
-            $rawHint = $tag->getValue(2);
-            $hint = null !== $rawHint && '' !== $rawHint ? RelayUrl::tryFromString($rawHint) : null;
-            $result[] = ['pubkey' => $pubkey, 'hint' => $hint];
-        }
+        $inbox = $directory->relaysOf($recipient->getPubkey(), RelayRole::Inbox);
+        $candidates = $inbox->isEmpty() ? $directory->permitted(self::hintOf($recipient)) : $inbox;
 
-        return $result;
+        return $policy->getPerRecipientCap()->limit($candidates);
+    }
+
+    private static function hintOf(Recipient $recipient): RelaySet
+    {
+        $hint = $recipient->getHint();
+
+        return new RelaySet(null === $hint ? [] : [$hint]);
     }
 }
