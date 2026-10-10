@@ -26,7 +26,7 @@ final class EventKindTest extends TestCase
     {
         $this->assertSame(
             [true, true, true, false],
-            array_map(static fn (EventKind $kind): bool => $kind->isDraft(), [EventKind::LongformContentDraft, EventKind::ClassifiedListingDraft, EventKind::DraftEvent, EventKind::Metadata]),
+            array_map(static fn (EventKind $kind): bool => $kind->isDraft(), [EventKind::LongformContentDraft, EventKind::ClassifiedListingDraft, EventKind::DraftWrap, EventKind::Metadata]),
         );
     }
 

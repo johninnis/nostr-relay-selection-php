@@ -25,7 +25,7 @@ enum EventKind: int
     case KindMuteSet = 30007;
     case LongformContentDraft = 30024;
     case ClassifiedListingDraft = 30403;
-    case DraftEvent = 31234;
+    case DraftWrap = 31234;
     case StarterPack = 39089;
     case MediaStarterPack = 39092;
 
@@ -43,7 +43,7 @@ enum EventKind: int
         return match ($this) {
             self::LongformContentDraft,
             self::ClassifiedListingDraft,
-            self::DraftEvent => true,
+            self::DraftWrap => true,
             default => false,
         };
     }

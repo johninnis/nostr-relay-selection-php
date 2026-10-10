@@ -181,6 +181,12 @@ Three lists can be partly or wholly encrypted, so you pass their relays in rathe
 | 10007 search relays | NIP-51 | Public entries are read from the directory for the search branch; add decrypted entries to the read policy's caller relays. |
 | 10013 private content relays | NIP-37 | The `privateContentRelays` argument of `PublishPolicy`, for drafts. |
 
+## Upgrading from 0.3
+
+0.4 renames one kind:
+
+- `EventKind::DraftEvent` (31234) becomes `DraftWrap`, the name both nostr-core libraries give it ([ADR-0014](docs/adr/0014-a-kind-is-named-only-when-routing-branches-on-it.md)). It routes as before.
+
 ## Upgrading from 0.2
 
 0.3 replaces the context objects with the directory and small policy objects:
