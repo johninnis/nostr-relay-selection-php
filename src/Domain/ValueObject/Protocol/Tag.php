@@ -18,6 +18,9 @@ final readonly class Tag
      */
     public function __construct(array $values)
     {
+        if ([] === $values) {
+            throw new InvalidArgumentException('A tag must have at least one value');
+        }
         $this->values = array_values(array_map(
             static fn (mixed $value): string => is_string($value)
                 ? $value
@@ -33,6 +36,6 @@ final readonly class Tag
 
     public static function tryFromRaw(mixed $raw): ?self
     {
-        return is_array($raw) && array_is_list($raw) && array_all($raw, static fn (mixed $value): bool => is_string($value)) ? new self($raw) : null;
+        return is_array($raw) && [] !== $raw && array_is_list($raw) && array_all($raw, static fn (mixed $value): bool => is_string($value)) ? new self($raw) : null;
     }
 }

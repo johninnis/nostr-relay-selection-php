@@ -8,12 +8,15 @@ use Innis\Nostr\RelaySelection\Domain\Collection\RelaySet;
 
 final readonly class PublishPolicy
 {
+    private PerRecipientCap $perRecipientCap;
+
     public function __construct(
         private RelaySet $privateContentRelays = new RelaySet(),
         private RelaySet $indexerRelays = new RelaySet(),
         private RelaySet $groupRelays = new RelaySet(),
-        private PerRecipientCap $perRecipientCap = new PerRecipientCap(PHP_INT_MAX),
+        ?PerRecipientCap $perRecipientCap = null,
     ) {
+        $this->perRecipientCap = $perRecipientCap ?? PerRecipientCap::all();
     }
 
     public function getPrivateContentRelays(): RelaySet

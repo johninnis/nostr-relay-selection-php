@@ -25,9 +25,14 @@ final class EventKindTest extends TestCase
     public function testTheDraftKindsAreDrafts(): void
     {
         $this->assertSame(
-            [true, true, true, false],
-            array_map(static fn (EventKind $kind): bool => $kind->isDraft(), [EventKind::LongformContentDraft, EventKind::ClassifiedListingDraft, EventKind::DraftWrap, EventKind::Metadata]),
+            [true, true, false],
+            array_map(static fn (EventKind $kind): bool => $kind->isDraft(), [EventKind::LongformContentDraft, EventKind::DraftWrap, EventKind::Metadata]),
         );
+    }
+
+    public function testTheNip99ClassifiedListingDraftKindIsNotNamedBecauseItRoutesLikeAnyPublicKind(): void
+    {
+        $this->assertNotContains(30403, array_map(static fn (EventKind $kind): int => $kind->value, EventKind::cases()));
     }
 
     public function testExactlyTheFollowListTheNip51ListsAndSetsOfPeopleAndTheReportArePubkeyData(): void

@@ -16,6 +16,12 @@ final class TagTest extends TestCase
         new Tag(['p', 42]);
     }
 
+    public function testConstructorRejectsATagWithNoElements(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new Tag([]);
+    }
+
     public function testGetValueReturnsNullPastTheLastValue(): void
     {
         $this->assertNull(new Tag(['p'])->getValue(1));
@@ -24,6 +30,11 @@ final class TagTest extends TestCase
     public function testTryFromRawReturnsNullForANonStringValue(): void
     {
         $this->assertNull(Tag::tryFromRaw(['p', 42]));
+    }
+
+    public function testTryFromRawReturnsNullForATagWithNoElements(): void
+    {
+        $this->assertNull(Tag::tryFromRaw([]));
     }
 
     public function testTryFromRawReturnsNullForANonArray(): void

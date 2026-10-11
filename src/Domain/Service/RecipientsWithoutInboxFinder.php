@@ -16,7 +16,7 @@ final class RecipientsWithoutInboxFinder
     public static function find(Event $event, RelayDirectory $directory): PublicKeyCollection
     {
         $kind = EventKind::tryFrom($event->getKind());
-        if (($kind?->isGiftWrap() ?? false) || ($kind?->isDraft() ?? false)) {
+        if (($kind?->isGiftWrap() ?? false) || ($kind?->isDraft() ?? false) || null !== GroupClaimExtractor::fromEvent($event)) {
             return new PublicKeyCollection();
         }
         $withoutInbox = array_filter(
