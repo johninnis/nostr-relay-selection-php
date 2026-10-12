@@ -231,6 +231,7 @@ composer test-unit     # Unit suite only
 composer analyse       # PHPStan level 9
 composer check-style   # php-cs-fixer, dry run
 composer check-rector  # Rector, dry run
+composer check-path-lengths  # no tracked path component over 95 characters
 composer fix-style     # php-cs-fixer
 ```
 
